@@ -1,0 +1,44 @@
+{
+    "default_server": {
+        "description": "默认查询的 Minecraft 服务器地址",
+        "type": "string",
+        "hint": "设置后，使用 motd 指令时不带参数将查询此服务器",
+        "default": ""
+    },
+    "default_port": {
+        "description": "默认服务器端口",
+        "type": "int",
+        "hint": "Minecraft Java 版默认端口为 25565，基岩版为 19132",
+        "default": 25565
+    },
+    "enable_all_sessions": {
+        "description": "对所有会话生效",
+        "type": "bool",
+        "hint": "开启后，所有群聊和私聊都可以使用此插件",
+        "default": true
+    },
+    "enabled_sessions": {
+        "description": "允许使用插件的会话列表",
+        "type": "list",
+        "hint": "当【对所有会话生效】关闭时，只有这些会话可以使用插件。会话ID格式: 平台名:消息类型:ID",
+        "default": []
+    },
+    "admin_only_config": {
+        "description": "仅管理员可修改配置",
+        "type": "bool",
+        "hint": "开启后，只有 AstrBot 平台配置中的管理员才能使用 motd-config 指令",
+        "default": true
+    },
+    "query_timeout": {
+        "description": "查询超时时间（秒）",
+        "type": "int",
+        "hint": "查询服务器时的超时时间，建议 5-10 秒",
+        "default": 5
+    },
+    "use_api": {
+        "description": "使用 API 查询服务器",
+        "type": "bool",
+        "hint": "开启后使用 mcstatus.io API 查询，更稳定可靠。关闭则使用直接连接查询。",
+        "default": true
+    }
+}

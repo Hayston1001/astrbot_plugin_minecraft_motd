@@ -1,0 +1,827 @@
+"""
+AstrBot MOTD 查询插件
+用于查询 Minecraft 服务器状态
+"""
+
+import socket
+import struct
+import json
+import time
+import re
+import asyncio
+import aiohttp
+from typing import Optional, Dict, Any, Tuple
+
+from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.star import Context, Star, register
+from astrbot.api import logger, AstrBotConfig
+import astrbot.api.message_components as Comp
+
+
+# Java 版标准端口
+JAVA_DEFAULT_PORT = 25565
+# 基岩版标准端口
+BEDROCK_DEFAULT_PORT = 19132
+
+# ============================================================
+# 协议号 → 版本名 完整映射（2026-06 更新）
+# 格式: protocol: (显示版本, 主版本号)
+# 注: 26.x 起 Minecraft 采用年份.版本的新命名规则
+# ============================================================
+PROTOCOL_VERSION_MAP: Dict[int, Tuple[str, str]] = {
+    4:    ("1.7.2-1.7.5", "1.7"),
+    5:    ("1.7.6-1.7.10", "1.7"),
+    47:   ("1.8.x", "1.8"),
+    107:  ("1.9", "1.9"),
+    108:  ("1.9.1", "1.9"),
+    109:  ("1.9.2", "1.9"),
+    110:  ("1.9.3-1.9.4", "1.9"),
+    210:  ("1.10.x", "1.10"),
+    315:  ("1.11.x", "1.11"),
+    316:  ("1.11.1", "1.11"),
+    335:  ("1.12", "1.12"),
+    338:  ("1.12.1", "1.12"),
+    340:  ("1.12.2", "1.12"),
+    393:  ("1.13", "1.13"),
+    394:  ("1.13.1", "1.13"),
+    401:  ("1.13.2", "1.13"),
+    477:  ("1.14", "1.14"),
+    480:  ("1.14.1", "1.14"),
+    485:  ("1.14.2", "1.14"),
+    490:  ("1.14.3", "1.14"),
+    498:  ("1.14.4", "1.14"),
+    573:  ("1.15", "1.15"),
+    575:  ("1.15.1", "1.15"),
+    578:  ("1.15.2", "1.15"),
+    735:  ("1.16", "1.16"),
+    736:  ("1.16.1", "1.16"),
+    751:  ("1.16.2", "1.16"),
+    753:  ("1.16.3", "1.16"),
+    754:  ("1.16.4-1.16.5", "1.16"),
+    755:  ("1.17", "1.17"),
+    756:  ("1.17.1", "1.17"),
+    757:  ("1.18-1.18.1", "1.18"),
+    758:  ("1.18.2", "1.18"),
+    759:  ("1.19", "1.19"),
+    760:  ("1.19.1-1.19.2", "1.19"),
+    761:  ("1.19.3", "1.19"),
+    762:  ("1.19.4", "1.19"),
+    763:  ("1.20-1.20.1", "1.20"),
+    764:  ("1.20.2", "1.20"),
+    765:  ("1.20.3-1.20.4", "1.20"),
+    766:  ("1.20.5-1.20.6", "1.20"),
+    767:  ("1.21-1.21.1", "1.21"),
+    768:  ("1.21.2-1.21.3", "1.21"),
+    769:  ("1.21.4", "1.21"),
+    770:  ("1.21.5", "1.21"),
+    771:  ("1.21.6", "1.21"),
+    # 注: 1.21.7 复用了 1.21-1.21.1 的协议号 767，已在上方 767 条目中覆盖
+    772:  ("1.21.8", "1.21"),
+    773:  ("1.21.9-1.21.10", "1.21"),
+    774:  ("1.21.11", "1.21"),
+}
+
+# 已知代理/跨版本软件关键词 → 显示名
+_PROXY_KEYWORDS = {
+    "velocity": "Velocity",
+    "bungeecord": "BungeeCord",
+    "bungee": "BungeeCord",
+    "waterfall": "Waterfall",
+    "flamecord": "FlameCord",
+    "viaversion": "ViaVersion",
+    "viabackwards": "ViaBackwards",
+    "viaforwarders": "ViaForwarders",
+    "geyser": "Geyser",
+    "wynnproxy": "WynnProxy",
+}
+
+# 版本号正则（匹配 1.x.y 或 1.x）
+_VERSION_RE = re.compile(r'(\d+\.\d+(?:\.\d+)?)')
+
+# 版本名 → 协议号 反向查找表（从 PROTOCOL_VERSION_MAP 构建）
+_VERSION_TO_PROTOCOL: Dict[str, int] = {}
+
+
+def _build_version_to_protocol():
+    """从 PROTOCOL_VERSION_MAP 构建版本名到协议号的反向映射"""
+    for proto, (ver_str, _major) in PROTOCOL_VERSION_MAP.items():
+        parts = ver_str.split("-")
+        start = parts[0]
+        end = parts[-1] if len(parts) > 1 else start
+
+        start_m = _VERSION_RE.search(start)
+        end_m = _VERSION_RE.search(end)
+        if not start_m or not end_m:
+            continue
+
+        start_parts = [int(x) for x in start_m.group(1).split(".")]
+        end_parts = [int(x) for x in end_m.group(1).split(".")]
+
+        # 补齐到三段
+        while len(start_parts) < 3:
+            start_parts.append(0)
+        while len(end_parts) < 3:
+            end_parts.append(0)
+
+        if start_parts == end_parts:
+            _VERSION_TO_PROTOCOL[".".join(str(x) for x in start_parts)] = proto
+        else:
+            # 范围映射：首尾版本都指向同一个协议号
+            for ver in [
+                ".".join(str(x) for x in start_parts),
+                ".".join(str(x) for x in end_parts),
+            ]:
+                _VERSION_TO_PROTOCOL[ver] = proto
+
+    # 特殊映射：某些版本复用了其他版本的协议号
+    _VERSION_TO_PROTOCOL["1.21.7"] = 767  # 1.21.7 复用了 1.21-1.21.1 的协议号
+
+
+_build_version_to_protocol()
+
+
+def _lookup_protocol_from_name(version_name: str) -> Optional[int]:
+    """从版本名中提取最高版本号，反查协议号。未找到返回 None。"""
+    if not version_name:
+        return None
+    matches = _VERSION_RE.findall(version_name)
+    if not matches:
+        return None
+    # 取最高版本号
+    best = max(matches, key=lambda v: [int(x) for x in v.split(".") if x.isdigit()])
+    # 先精确查找，再尝试补齐到三段查找（如 1.8 → 1.8.0）
+    result = _VERSION_TO_PROTOCOL.get(best)
+    if result is not None:
+        return result
+    parts = best.split(".")
+    if len(parts) == 2:
+        result = _VERSION_TO_PROTOCOL.get(f"{best}.0")
+        if result is not None:
+            return result
+    return None
+
+
+async def query_java_server_api(host: str, port: int = JAVA_DEFAULT_PORT) -> Dict[str, Any]:
+    """使用第三方 API 查询 Java 版服务器状态"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"https://api.mcstatus.io/v2/status/java/{host}:{port}"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("online"):
+                        version_data = data.get("version", {})
+                        # Bug Fix: API 返回的是 name_raw/name_clean，不是 name
+                        version_name_raw = version_data.get("name_raw") or version_data.get("name_clean") or version_data.get("name", "")
+                        protocol_raw = version_data.get("protocol")
+
+                        # API 返回 protocol: null 时，尝试从版本名反查协议号
+                        if protocol_raw is None:
+                            protocol_raw = _lookup_protocol_from_name(version_name_raw)
+                            if protocol_raw is not None:
+                                logger.info(f"[MOTD] API 未返回协议号，从版本名 '{version_name_raw}' 反查到协议 {protocol_raw}")
+                            else:
+                                # 反查失败，尝试直连查询补全协议号
+                                logger.info(f"[MOTD] API 未返回协议号，尝试直连查询补全")
+                                direct = await query_java_server_direct(host, port)
+                                if "error" not in direct and "version" in direct:
+                                    protocol_raw = direct["version"].get("protocol")
+                                    if protocol_raw is not None:
+                                        logger.info(f"[MOTD] 直连查询补全协议号: {protocol_raw}")
+
+                        return {
+                            "version": {"name": version_name_raw, "protocol": protocol_raw if protocol_raw is not None else 0},
+                            "players": {"online": data.get("players", {}).get("online", 0), "max": data.get("players", {}).get("max", 0)},
+                            "description": data.get("motd", {}).get("clean", "无描述")
+                        }
+                    else:
+                        return {"error": "服务器离线或无法访问"}
+                else:
+                    return {"error": f"API 请求失败: {resp.status}"}
+    except asyncio.TimeoutError:
+        return {"error": "API 请求超时"}
+    except Exception as e:
+        return {"error": f"API 查询失败: {str(e)}"}
+
+
+async def query_java_server_direct(host: str, port: int = JAVA_DEFAULT_PORT, timeout: int = 5) -> Dict[str, Any]:
+    """直接查询 Java 版服务器状态"""
+    
+    def _pack_varint(value: int) -> bytes:
+        result = b""
+        while True:
+            byte = value & 0x7F
+            value >>= 7
+            if value:
+                result += struct.pack("B", byte | 0x80)
+            else:
+                result += struct.pack("B", byte)
+                break
+        return result
+    
+    def _unpack_varint(sock: socket.socket) -> int:
+        result = 0
+        for i in range(5):
+            byte = sock.recv(1)
+            if not byte:
+                raise ConnectionError("连接中断")
+            byte = byte[0]
+            result |= (byte & 0x7F) << (7 * i)
+            if not (byte & 0x80):
+                return result
+        raise ValueError("变长整数过大")
+    
+    def _pack_data(data: bytes) -> bytes:
+        return _pack_varint(len(data)) + data
+    
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((host, port))
+        
+        # 发送握手包
+        handshake_data = (
+            _pack_varint(-1) +  # 协议版本 -1
+            _pack_data(host.encode('utf-8')) +
+            struct.pack('>H', port) +
+            _pack_varint(1)  # 状态请求
+        )
+        packet = _pack_varint(0) + handshake_data
+        sock.sendall(_pack_data(packet))
+        
+        # 发送状态请求
+        sock.sendall(_pack_data(_pack_varint(0)))
+        
+        # 读取响应长度
+        length = _unpack_varint(sock)
+        packet_id = _unpack_varint(sock)
+        
+        # 读取 JSON 长度
+        json_length = _unpack_varint(sock)
+        
+        # 读取 JSON 数据
+        json_data = b""
+        while len(json_data) < json_length:
+            chunk = sock.recv(min(4096, json_length - len(json_data)))
+            if not chunk:
+                break
+            json_data += chunk
+        
+        sock.close()
+        
+        response = json.loads(json_data.decode('utf-8'))
+        return response
+        
+    except socket.timeout:
+        return {"error": "连接超时，请检查服务器地址和端口是否正确"}
+    except socket.gaierror:
+        return {"error": "无法解析服务器地址，请检查主机名是否正确"}
+    except ConnectionRefusedError:
+        return {"error": "连接被拒绝，服务器可能未运行或端口不正确"}
+    except Exception as e:
+        return {"error": f"查询失败: {str(e)}"}
+
+
+async def query_java_server(host: str, port: int = JAVA_DEFAULT_PORT, timeout: int = 5, use_api: bool = True) -> Dict[str, Any]:
+    """查询 Java 版服务器状态，优先使用 API"""
+    if use_api:
+        # 先尝试 API
+        result = await query_java_server_api(host, port)
+        if "error" not in result:
+            return result
+        logger.info(f"[MOTD] API 查询失败，尝试直接查询: {result.get('error')}")
+
+    # API 失败或禁用 API，使用直接查询
+    result = await query_java_server_direct(host, port, timeout)
+
+    # 直连返回协议号 ≤ 0（代理/多版本服务器），补查 API 获取带范围的版本名
+    if "error" not in result:
+        proto = result.get("version", {}).get("protocol", 0)
+        if proto is not None and proto <= 0:
+            logger.info(f"[MOTD] 直连协议号 {proto}，补查 API 获取版本范围")
+            api_result = await query_java_server_api(host, port)
+            if "error" not in api_result:
+                api_name = api_result.get("version", {}).get("name", "")
+                if api_name and api_name != result.get("version", {}).get("name", ""):
+                    result["version"]["name"] = api_name
+                    logger.info(f"[MOTD] API 补全版本名: {api_name}")
+
+    return result
+
+
+async def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, timeout: int = 5) -> Dict[str, Any]:
+    """异步查询基岩版服务器状态"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(timeout)
+        
+        # 发送 Unconnected Ping
+        ping_data = b'\x01' + struct.pack('>Q', int(time.time() * 1000)) + b'\x00\x00\x00\x00\x00\x00\x00\x00'
+        sock.sendto(ping_data, (host, port))
+        
+        # 接收响应
+        data, addr = sock.recvfrom(2048)
+        sock.close()
+        
+        # 解析响应
+        if len(data) < 35:
+            return {"error": "响应数据无效"}
+        
+        # 跳过头部
+        server_info = data[35:].decode('utf-8', errors='ignore').split(';')
+        
+        if len(server_info) >= 6:
+            return {
+                "edition": server_info[0],
+                "motd": server_info[1],
+                "protocol": server_info[2],
+                "version": server_info[3],
+                "online_players": server_info[4],
+                "max_players": server_info[5],
+                "server_id": server_info[6] if len(server_info) > 6 else "未知"
+            }
+        else:
+            return {"error": "无法解析服务器响应"}
+            
+    except socket.timeout:
+        return {"error": "连接超时，请检查服务器地址和端口是否正确"}
+    except Exception as e:
+        return {"error": f"查询失败: {str(e)}"}
+
+
+@register("astrbot_plugin_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.2.0")
+class MOTDPlugin(Star):
+    """MOTD 查询插件主类"""
+    
+    def __init__(self, context: Context, config: AstrBotConfig):
+        super().__init__(context)
+        self.config = config
+        self._load_config()
+        logger.info(f"[MOTD] 插件初始化完成，版本 1.2.0")
+    
+    def _load_config(self):
+        """加载插件配置"""
+        self.default_server = self.config.get("default_server", "")
+        self.default_port = self.config.get("default_port", JAVA_DEFAULT_PORT)
+        self.enabled_sessions = self.config.get("enabled_sessions", [])
+        self.enable_all_sessions = self.config.get("enable_all_sessions", True)
+        self.admin_only_config = self.config.get("admin_only_config", True)
+        self.query_timeout = self.config.get("query_timeout", 5)
+        self.use_api = self.config.get("use_api", True)
+        
+        logger.info(f"[MOTD] 配置加载: default_server='{self.default_server}', port={self.default_port}")
+        logger.info(f"[MOTD] 使用 API 查询: {self.use_api}")
+    
+    def _is_admin(self, event: AstrMessageEvent) -> bool:
+        """检查用户是否为管理员"""
+        try:
+            astrbot_config = self.context.get_config()
+            if astrbot_config:
+                admins = astrbot_config.get("admins_id", [])
+                sender_id = event.get_sender_id()
+                return sender_id in admins
+        except Exception as e:
+            logger.error(f"[MOTD] 管理员检查失败: {e}")
+        return False
+    
+    def _check_session_allowed(self, event: AstrMessageEvent) -> bool:
+        """检查会话是否允许使用插件"""
+        if self.enable_all_sessions:
+            return True
+        session_id = event.unified_msg_origin
+        return session_id in self.enabled_sessions
+    
+    def _parse_server_address(self, address: str, is_java: bool = True) -> tuple:
+        """
+        解析服务器地址和端口
+        如果用户指定了地址但不带端口，使用标准端口（Java 25565 / 基岩 19132）
+        """
+        if ':' in address:
+            host, port_str = address.rsplit(':', 1)
+            try:
+                port = int(port_str)
+            except ValueError:
+                port = JAVA_DEFAULT_PORT if is_java else BEDROCK_DEFAULT_PORT
+            host = host.strip('[]')
+        else:
+            host = address
+            port = JAVA_DEFAULT_PORT if is_java else BEDROCK_DEFAULT_PORT
+        return host, port
+    
+    def _format_motd(self, motd_data: Any) -> str:
+        """格式化 MOTD 文本"""
+        if isinstance(motd_data, str):
+            return motd_data
+        elif isinstance(motd_data, dict):
+            text = motd_data.get("text", "")
+            extra = motd_data.get("extra", [])
+            for item in extra:
+                if isinstance(item, dict):
+                    text += item.get("text", "")
+                elif isinstance(item, str):
+                    text += item
+            return text
+        elif isinstance(motd_data, list):
+            text = ""
+            for item in motd_data:
+                if isinstance(item, dict):
+                    text += item.get("text", "")
+                elif isinstance(item, str):
+                    text += item
+            return text
+        return str(motd_data)
+    
+    def _parse_version(self, version_info: Dict[str, Any]) -> Tuple[str, str, str]:
+        """
+        解析版本信息，支持 ViaVersion/Velocity/BungeeCord 等多版本兼容模式
+        返回: (版本显示文本, 协议显示文本, 代理/多版本提示)
+        """
+        version_name = (version_info.get("name") or "").strip()
+
+        # 确保 protocol 是整数
+        protocol_raw = version_info.get("protocol", 0)
+        try:
+            protocol = int(protocol_raw) if protocol_raw is not None else 0
+        except (ValueError, TypeError):
+            protocol = 0
+
+        # ── 1. 从版本名提取版本号 ──
+        version_in_name = None
+        if version_name:
+            m = _VERSION_RE.search(version_name)
+            if m:
+                version_in_name = m.group(1)
+
+        # ── 1.5 协议号无效时，从版本名反查 ──
+        if protocol <= 0 and version_name:
+            looked_up = _lookup_protocol_from_name(version_name)
+            if looked_up is not None:
+                logger.info(f"[MOTD] 协议号无效({protocol})，从版本名 '{version_name}' 反查到协议 {looked_up}")
+                protocol = looked_up
+
+        # ── 2. 用协议号查服务器实际版本 ──
+        proto_ver_display, proto_major = PROTOCOL_VERSION_MAP.get(protocol, ("", ""))
+
+        # ── 3. 代理/多版本检测 ──
+        proxy_name = ""
+        is_multi_version = False
+
+        name_lower = version_name.lower()
+
+        # 3a. 版本名包含已知代理软件名
+        for kw, display_name in _PROXY_KEYWORDS.items():
+            if kw in name_lower:
+                proxy_name = display_name
+                is_multi_version = True
+                break
+
+        # 3b. 版本名包含范围格式（如 "1.7.2-1.21.11"、"1.8 - 26.1"、"1.8 / 1.21"）
+        if not is_multi_version and version_name:
+            if re.search(r'\d+\.\d+[\w.]*\s*[-~–/]\s*\d+\.\d+', version_name):
+                is_multi_version = True
+
+        # 3c. 版本名列出多个版本（如 "1.7.x, 1.8.x, ..., 1.21.x"）
+        if not is_multi_version and version_name:
+            version_matches = _VERSION_RE.findall(version_name)
+            if len(version_matches) >= 4:
+                is_multi_version = True
+
+        # 3d. 协议号 47 + 版本名提及高版本 → BungeeCord/Velocity
+        if not is_multi_version and protocol == 47 and version_in_name:
+            try:
+                ver_parts = [int(x) for x in version_in_name.split('.')]
+                if len(ver_parts) >= 2 and (ver_parts[0] > 1 or (ver_parts[0] == 1 and ver_parts[1] > 8)):
+                    is_multi_version = True
+            except (ValueError, IndexError):
+                pass
+
+        # ── 4. 从版本名解析支持范围上限 ──
+        max_supported_version = ""
+        if is_multi_version and version_name:
+            all_versions = _VERSION_RE.findall(version_name)
+            # 过滤掉明显不是 Minecraft 版本的数字（如代理版本号 3.4.0）
+            mc_versions = []
+            for v in all_versions:
+                parts = v.split('.')
+                if len(parts) >= 2 and parts[0] == '1' and parts[1].isdigit():
+                    mc_versions.append(v)
+                elif len(parts) >= 2:
+                    # Minecraft 新版本命名（26.x 起改用年份.版本格式）
+                    try:
+                        major = int(parts[0])
+                        if major >= 26:
+                            mc_versions.append(v)
+                    except ValueError:
+                        pass
+            if mc_versions:
+                max_supported_version = max(mc_versions, key=lambda v: [int(x) for x in v.split('.') if x.isdigit()])
+
+        # ── 5. 构建显示结果 ──
+        if is_multi_version:
+            # 多版本兼容服务器
+            base_version = proto_ver_display or version_in_name or "未知"
+            if max_supported_version and max_supported_version != base_version:
+                # 清理 base_version 中的 .x 后缀以便统一显示
+                base_clean = base_version.replace('.x', '')
+                version_display = f"{base_clean} → 支持至 {max_supported_version}"
+            else:
+                version_display = f"多版本兼容 ({version_name})" if version_name else "多版本兼容"
+        elif version_name and version_name not in ("", "未知", "Unknown"):
+            # 普通服务器，有版本名
+            version_display = version_name
+        elif protocol > 0:
+            # 用协议号推断
+            version_display = proto_ver_display or f"协议 {protocol}"
+        else:
+            version_display = "未知"
+
+        # ── 6. 协议显示 ──
+        if protocol <= 0:
+            protocol_display = "未知"
+        else:
+            protocol_display = str(protocol)
+
+        # ── 7. 代理/多版本提示 ──
+        if is_multi_version:
+            if proxy_name:
+                via_hint = f"检测到: {proxy_name} 代理"
+            else:
+                via_hint = "支持多版本客户端连接"
+        else:
+            via_hint = ""
+
+        logger.info(f"[MOTD] 版本解析: name='{version_name}', proto={protocol}, "
+                     f"display='{version_display}', hint='{via_hint}'")
+
+        return version_display, protocol_display, via_hint
+    
+    def _format_response(self, result: Dict[str, Any], server_address: str, is_java: bool = True) -> str:
+        """格式化查询结果"""
+        if "error" in result:
+            return f"❌ 查询失败\n服务器: {server_address}\n错误: {result['error']}"
+        
+        if is_java:
+            version_info = result.get("version", {})
+            players_info = result.get("players", {})
+            description = result.get("description", "无描述")
+            
+            motd_text = self._format_motd(description)
+            
+            # 使用增强的版本解析（支持 ViaVersion/Velocity/BungeeCord）
+            version_display, protocol_display, via_hint = self._parse_version(version_info)
+            
+            online = players_info.get("online", 0)
+            max_players = players_info.get("max", 0)
+            
+            sample = players_info.get("sample", [])
+            player_list = ""
+            if sample:
+                player_names = [p.get("name", "未知") for p in sample[:10]]
+                player_list = "\n在线玩家: " + ", ".join(player_names)
+                if len(sample) > 10:
+                    player_list += f" 等共 {len(sample)} 人"
+            
+            # 构建版本信息行
+            version_line = f"📋 版本: {version_display}"
+            version_line += f" (协议 {protocol_display})"
+
+            # 代理/多版本提示
+            via_line = f"\n🔄 {via_hint}" if via_hint else ""
+            
+            response = (
+                f"🎮 Minecraft 服务器状态\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📍 地址: {server_address}\n"
+                f"{version_line}{via_line}\n"
+                f"👥 玩家: {online}/{max_players}{player_list}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📝 MOTD:\n{motd_text}"
+            )
+        else:
+            response = (
+                f"🎮 Minecraft 基岩版服务器状态\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📍 地址: {server_address}\n"
+                f"📋 版本: {result.get('version', '未知')}\n"
+                f"👥 玩家: {result.get('online_players', 0)}/{result.get('max_players', 0)}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📝 MOTD:\n{result.get('motd', '无描述')}"
+            )
+        
+        return response
+    
+    async def _do_motd_query(self, event: AstrMessageEvent, server: str = "", is_java: bool = True):
+        """执行 MOTD 查询的核心逻辑"""
+        logger.info(f"[MOTD] 开始查询: server='{server}', is_java={is_java}")
+        
+        # 检查会话权限
+        if not self._check_session_allowed(event):
+            logger.info("[MOTD] 会话不在白名单中")
+            return
+        
+        # 确定查询的服务器
+        if not server or server.strip() == "":
+            # 使用默认服务器
+            if not self.default_server:
+                await event.send(event.plain_result(
+                    "❌ 未设置默认服务器\n"
+                    "请使用: motd <服务器地址:端口> 查询指定服务器\n"
+                    "或联系管理员使用 /motdconfig default <地址:端口> 设置"
+                ))
+                return
+            server = self.default_server
+            port = self.default_port
+            logger.info(f"[MOTD] 使用默认服务器: {server}:{port}")
+        else:
+            # 用户指定了服务器，解析地址和端口
+            server, port = self._parse_server_address(server.strip(), is_java=is_java)
+            logger.info(f"[MOTD] 使用指定服务器: {server}:{port}")
+        
+        server_address = f"{server}:{port}"
+        
+        # 发送查询中提示
+        await event.send(event.plain_result(f"🔍 正在查询服务器 {server_address} ..."))
+        
+        # 执行查询
+        logger.info(f"[MOTD] 开始执行查询，超时={self.query_timeout}秒")
+        try:
+            if is_java:
+                result = await asyncio.wait_for(
+                    query_java_server(server, port, self.query_timeout, self.use_api),
+                    timeout=self.query_timeout + 5
+                )
+            else:
+                result = await asyncio.wait_for(
+                    query_bedrock_server(server, port, self.query_timeout),
+                    timeout=self.query_timeout + 5
+                )
+            logger.info(f"[MOTD] 查询完成，结果: {result}")
+        except asyncio.TimeoutError:
+            logger.error("[MOTD] 查询超时")
+            result = {"error": "查询超时，服务器响应时间过长"}
+        except Exception as e:
+            logger.error(f"[MOTD] 查询异常: {e}")
+            result = {"error": f"查询异常: {str(e)}"}
+        
+        # 格式化并发送结果
+        response = self._format_response(result, server_address, is_java=is_java)
+        await event.send(event.plain_result(response))
+        logger.info("[MOTD] 查询流程完成")
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def on_message(self, event: AstrMessageEvent):
+        """监听所有消息，处理无斜杠前缀的 motd 指令"""
+        message = event.message_str.strip()
+        
+        # 获取原始消息链，检查第一个消息段
+        try:
+            message_chain = event.message_obj.message
+            if message_chain and len(message_chain) > 0:
+                first_seg = message_chain[0]
+                # 如果第一个消息段是 Plain 且以 / 开头，跳过（这是指令消息）
+                if hasattr(first_seg, 'text') and first_seg.text.startswith('/'):
+                    return
+        except:
+            pass
+        
+        # 简单文本检查：如果以 / 开头，跳过
+        if message.startswith('/'):
+            return
+        
+        # 检查消息是否以 motd 开头（不区分大小写）
+        if not re.match(r'^motd', message, re.IGNORECASE):
+            return
+        
+        # 匹配 motd 指令模式
+        motd_pattern = r'^(motd)(?:-bedrock)?(?:\s+(.+))?$'
+        match = re.match(motd_pattern, message, re.IGNORECASE)
+        
+        if match:
+            logger.info(f"[MOTD] 匹配到 motd 指令: {message}")
+            is_bedrock = '-bedrock' in message.lower()
+            server = match.group(2).strip() if match.group(2) else ""
+            
+            await self._do_motd_query(event, server, is_java=not is_bedrock)
+
+    @filter.command("motd")
+    async def motd_query_cmd(self, event: AstrMessageEvent, server: str = ""):
+        """MOTD 查询指令（带斜杠前缀）"""
+        # 获取原始消息，检查是否以 / 开头
+        message_str = event.message_str.strip()
+        if not message_str.startswith('/'):
+            logger.info(f"[MOTD] /motd 指令被跳过（消息不以 / 开头）")
+            return
+        
+        logger.info(f"[MOTD] 收到 /motd 指令: server='{server}'")
+        await self._do_motd_query(event, server, is_java=True)
+
+    @filter.command("motd-bedrock")
+    async def motd_bedrock_query_cmd(self, event: AstrMessageEvent, server: str = ""):
+        """基岩版 MOTD 查询指令（带斜杠前缀）"""
+        # 获取原始消息，检查是否以 / 开头
+        message_str = event.message_str.strip()
+        if not message_str.startswith('/'):
+            logger.info(f"[MOTD] /motd-bedrock 指令被跳过（消息不以 / 开头）")
+            return
+        
+        logger.info(f"[MOTD] 收到 /motd-bedrock 指令: server='{server}'")
+        await self._do_motd_query(event, server, is_java=False)
+
+    @filter.command("motdconfig")
+    async def motd_config_cmd(self, event: AstrMessageEvent, action: str = "", value: str = ""):
+        """MOTD 插件配置指令"""
+        # 获取原始消息，检查是否以 / 开头
+        message_str = event.message_str.strip()
+        if not message_str.startswith('/'):
+            logger.info(f"[MOTD] /motdconfig 指令被跳过（消息不以 / 开头）")
+            return
+        
+        logger.info(f"[MOTD] 收到 /motdconfig 指令: action={action}, value={value}")
+        
+        # 检查管理员权限
+        if not self._is_admin(event):
+            yield event.plain_result("❌ 只有管理员才能使用此指令")
+            return
+        
+        action = action.lower().strip()
+        
+        if action == "default":
+            if not value:
+                yield event.plain_result("❌ 请提供服务器地址\n用法: /motdconfig default <服务器地址:端口>")
+                return
+            
+            server, port = self._parse_server_address(value, is_java=True)
+            
+            # 验证服务器是否可连接
+            yield event.plain_result(f"🔍 正在验证服务器 {server}:{port} ...")
+            
+            try:
+                result = await asyncio.wait_for(
+                    query_java_server(server, port, self.query_timeout, self.use_api),
+                    timeout=self.query_timeout + 5
+                )
+            except asyncio.TimeoutError:
+                result = {"error": "验证超时"}
+            except Exception as e:
+                result = {"error": str(e)}
+            
+            if "error" in result:
+                yield event.plain_result(
+                    f"❌ 无法连接到服务器\n"
+                    f"地址: {server}:{port}\n"
+                    f"错误: {result['error']}\n"
+                    f"请检查地址是否正确，或服务器是否在线"
+                )
+                return
+            
+            # 更新配置
+            self.default_server = server
+            self.default_port = port
+            self.config["default_server"] = server
+            self.config["default_port"] = port
+            
+            # 保存配置
+            try:
+                self.config.save_config()
+                logger.info(f"[MOTD] 配置已保存: {server}:{port}")
+            except Exception as e:
+                logger.error(f"[MOTD] 保存配置失败: {e}")
+            
+            yield event.plain_result(
+                f"✅ 默认服务器设置成功\n"
+                f"地址: {server}:{port}\n"
+                f"MOTD: {self._format_motd(result.get('description', '无描述'))}"
+            )
+        
+        elif action == "get":
+            default = f"{self.default_server}:{self.default_port}" if self.default_server else "未设置"
+            sessions = "所有会话" if self.enable_all_sessions else f"{len(self.enabled_sessions)} 个会话"
+            
+            yield event.plain_result(
+                f"📋 MOTD 插件配置\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🖥️ 默认服务器: {default}\n"
+                f"💬 生效范围: {sessions}\n"
+                f"🔒 仅管理员配置: {'是' if self.admin_only_config else '否'}\n"
+                f"⏱️ 查询超时: {self.query_timeout}秒\n"
+                f"🌐 使用 API 查询: {'是' if self.use_api else '否'}"
+            )
+        
+        else:
+            yield event.plain_result(
+                "❓ 未知操作\n"
+                "可用操作:\n"
+                "  default <地址:端口> - 设置默认服务器\n"
+                "  get - 查看当前配置"
+            )
+
+    @filter.on_astrbot_loaded()
+    async def on_astrbot_loaded(self):
+        """Bot 初始化完成时"""
+        logger.info("=" * 50)
+        logger.info("[MOTD] 插件已加载 v1.2.0")
+        logger.info("[MOTD] 支持 ViaVersion/Velocity/BungeeCord 多版本兼容")
+        logger.info(f"[MOTD] 默认服务器: {self.default_server}:{self.default_port if self.default_server else '未设置'}")
+        logger.info(f"[MOTD] 对所有会话生效: {self.enable_all_sessions}")
+        logger.info(f"[MOTD] 使用 API 查询: {self.use_api}")
+        logger.info("=" * 50)
