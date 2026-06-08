@@ -41,7 +41,7 @@
 
 ## 安装方法
 
-1. 将插件文件夹 `astrbot_plugin_motd` 复制到 AstrBot 的 `plugins` 目录下
+1. 将插件文件夹 `astrbot_plugin_minecraft_motd` 复制到 AstrBot 的 `plugins` 目录下
 2. **重启 AstrBot**（重要！热重载可能无法正确加载配置）
 3. 在 WebUI 的插件配置中设置相关参数
 4. 保存配置并重启 AstrBot
@@ -64,7 +64,7 @@
 
 ### 2. 配置文件方式
 
-也可以直接编辑 `data/config/astrbot_plugin_motd_config.json`：
+也可以直接编辑 `data/config/astrbot_plugin_minecraft_motd_config.json`：
 
 ```json
 {

@@ -349,7 +349,7 @@ async def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, time
         return {"error": f"查询失败: {str(e)}"}
 
 
-@register("astrbot_plugin_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.2.0")
+@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.2.0")
 class MOTDPlugin(Star):
     """MOTD 查询插件主类"""
     
