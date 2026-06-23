@@ -467,7 +467,7 @@ body {
     <div class="motd-box">{{ motd_html }}</div>
   </div>
 
-  <div class="footer">Minecraft 服务器 motd 查询 · Hayston</div>
+  <div class="footer">Minecraft 服务器 motd 查询 · Hayston1001</div>
   {% endif %}
 
 </div>
