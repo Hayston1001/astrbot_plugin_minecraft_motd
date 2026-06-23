@@ -95,6 +95,14 @@ _PROXY_KEYWORDS = {
     "wynnproxy": "WynnProxy",
 }
 
+# Minecraft 颜色码 → CSS 颜色值
+MINECRAFT_COLOR_MAP = {
+    '0': '#000000', '1': '#0000aa', '2': '#00aa00', '3': '#00aaaa',
+    '4': '#aa0000', '5': '#aa00aa', '6': '#ffaa00', '7': '#aaaaaa',
+    '8': '#555555', '9': '#5555ff', 'a': '#55ff55', 'b': '#55ffff',
+    'c': '#ff5555', 'd': '#ff55ff', 'e': '#ffff55', 'f': '#ffffff',
+}
+
 # 版本号正则（匹配 1.x.y 或 1.x）
 _VERSION_RE = re.compile(r'(\d+\.\d+(?:\.\d+)?)')
 
@@ -159,6 +167,11 @@ def _lookup_protocol_from_name(version_name: str) -> Optional[int]:
         if result is not None:
             return result
     return None
+
+
+def _html_escape(text: str) -> str:
+    """HTML 转义"""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
 async def query_java_server_api(host: str, port: int = JAVA_DEFAULT_PORT) -> Dict[str, Any]:
@@ -347,6 +360,129 @@ async def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, time
         return {"error": "连接超时，请检查服务器地址和端口是否正确"}
     except Exception as e:
         return {"error": f"查询失败: {str(e)}"}
+
+
+# ============================================================
+# HTML 模板：MOTD 服务器状态卡片
+# ============================================================
+MOTD_HTML_TEMPLATE = '''
+<style>
+body {
+    margin: 0; padding: 24px;
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
+}
+.card {
+    background: rgba(255,255,255,0.05);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 16px;
+    padding: 28px 32px;
+    color: #e0e0e0;
+    width: 460px;
+}
+.header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+.title { font-size: 22px; font-weight: 700; color: #fff; }
+.badge {
+    font-size: 12px; font-weight: 600;
+    padding: 3px 12px; border-radius: 20px;
+    background: rgba(85,255,85,0.15); color: #55ff55; border: 1px solid rgba(85,255,85,0.3);
+}
+.badge-bedrock {
+    background: rgba(255,170,0,0.15); color: #ffaa00; border-color: rgba(255,170,0,0.3);
+}
+.divider { height: 1px; background: rgba(255,255,255,0.08); margin: 16px 0; }
+.row { display: flex; align-items: center; margin-bottom: 10px; font-size: 15px; }
+.row .icon { margin-right: 10px; }
+.row .label { color: #8899aa; min-width: 65px; }
+.row .value { color: #fff; font-weight: 500; flex: 1; }
+.via-hint { font-size: 12px; color: #ffaa00; margin-left: 8px; }
+.player-section { margin-top: 4px; }
+.player-title { font-size: 13px; color: #8899aa; margin-bottom: 6px; }
+.player-list {
+    display: flex; flex-wrap: wrap; gap: 6px;
+}
+.player-tag {
+    font-size: 12px; padding: 2px 10px;
+    background: rgba(255,255,255,0.08); border-radius: 12px; color: #ccc;
+}
+.motd-section { margin-top: 4px; }
+.motd-label { font-size: 13px; color: #8899aa; margin-bottom: 6px; }
+.motd-box {
+    background: rgba(0,0,0,0.25); border-radius: 10px;
+    padding: 14px 18px; font-size: 14px; line-height: 1.7;
+    color: #e0e0e0; word-break: break-all;
+}
+.footer { margin-top: 16px; text-align: right; font-size: 11px; color: rgba(255,255,255,0.25); }
+.error-card {
+    background: rgba(255,85,85,0.08); border-color: rgba(255,85,85,0.2);
+}
+.error-card .title { color: #ff5555; }
+.error-msg {
+    background: rgba(255,85,85,0.1); border-radius: 10px;
+    padding: 14px 18px; font-size: 14px; color: #ff8888;
+}
+</style>
+
+<div class="card {% if is_error %}error-card{% endif %}">
+
+  {% if is_error %}
+  <div class="header">
+    <span class="title">❌ 查询失败</span>
+    <span class="badge badge-bedrock">{{ edition_label }}</span>
+  </div>
+  <div class="row"><span class="icon">📍</span><span class="label">服务器</span><span class="value">{{ server_address }}</span></div>
+  <div class="error-msg">{{ error_msg }}</div>
+
+  {% else %}
+  <div class="header">
+    <span class="title">🎮 服务器状态</span>
+    <span class="badge {% if not is_java %}badge-bedrock{% endif %}">{{ edition_label }}</span>
+  </div>
+
+  <div class="row"><span class="icon">📍</span><span class="label">地址</span><span class="value">{{ server_address }}</span></div>
+
+  <div class="row">
+    <span class="icon">📋</span><span class="label">版本</span>
+    <span class="value">{{ version_display }} <span style="color:#8899aa;font-size:13px">(协议 {{ protocol_display|default('--') }})</span></span>
+  </div>
+
+  {% if via_hint %}
+  <div class="row"><span class="icon">🔄</span><span class="label">兼容</span><span class="value"><span class="via-hint">{{ via_hint }}</span></span></div>
+  {% endif %}
+
+  <div class="row">
+    <span class="icon">👥</span><span class="label">玩家</span>
+    <span class="value">
+      {{ online }} / {{ max_players }}
+      <span style="font-size:13px;margin-left:8px;background:rgba({{ '85,255,85' if online > 0 else '255,85,85' }},0.15);
+            padding:1px 8px;border-radius:10px;color:{{ '#55ff55' if online > 0 else '#ff5555' }}">
+        ● {{ '在线' if online > 0 else '离线' }}
+      </span>
+    </span>
+  </div>
+
+  {% if player_list %}
+  <div class="player-section">
+    <div class="player-title">在线玩家 ({{ player_list|length }}{% if extra_count > 0 %}+{{ extra_count }}{% endif %})</div>
+    <div class="player-list">
+      {% for p in player_list %}<span class="player-tag">{{ p }}</span>{% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="divider"></div>
+
+  <div class="motd-section">
+    <div class="motd-label">MOTD</div>
+    <div class="motd-box">{{ motd_html }}</div>
+  </div>
+
+  <div class="footer">Minecraft 服务器 motd 查询 · Hayston</div>
+  {% endif %}
+
+</div>
+'''
 
 
 @register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.2.0")
@@ -554,62 +690,95 @@ class MOTDPlugin(Star):
                      f"display='{version_display}', hint='{via_hint}'")
 
         return version_display, protocol_display, via_hint
-    
-    def _format_response(self, result: Dict[str, Any], server_address: str, is_java: bool = True) -> str:
-        """格式化查询结果"""
+
+    def _motd_to_html(self, motd_data: Any) -> str:
+        """将 MOTD 数据转换为带颜色的 HTML，支持 § 颜色码和 JSON 格式"""
+        parts = []
+        current_color = '#ffffff'
+
+        def _flush(text: str):
+            if text:
+                escaped = _html_escape(text)
+                if current_color != '#ffffff':
+                    parts.append(f'<span style="color:{current_color}">{escaped}</span>')
+                else:
+                    parts.append(escaped)
+
+        def _walk(data, color):
+            nonlocal current_color
+            if isinstance(data, str):
+                # 处理 § 颜色码
+                segments = re.split(r'(§[0-9a-fk-or])', data)
+                for seg in segments:
+                    m = re.match(r'§([0-9a-f])', seg, re.IGNORECASE)
+                    if m:
+                        code = m.group(1).lower()
+                        _flush('')  # 保存当前颜色段
+                        current_color = MINECRAFT_COLOR_MAP.get(code, current_color)
+                    elif seg:
+                        _flush(seg)
+            elif isinstance(data, dict):
+                c = color
+                if 'color' in data:
+                    c = data['color']
+                if c:
+                    current_color = c
+                _walk(data.get('text', ''), c)
+                for item in data.get('extra', []):
+                    _walk(item, c)
+            elif isinstance(data, list):
+                for item in data:
+                    _walk(item, color)
+
+        _walk(motd_data, current_color)
+        _flush('')  # flush remaining
+        return ''.join(parts) if parts else _html_escape(str(motd_data))
+
+    def _format_response(self, result: Dict[str, Any], server_address: str, is_java: bool = True) -> Dict[str, Any]:
+        """格式化查询结果为 HTML 模板上下文字典"""
         if "error" in result:
-            return f"❌ 查询失败\n服务器: {server_address}\n错误: {result['error']}"
-        
+            return {
+                "is_error": True, "is_java": is_java,
+                "server_address": server_address,
+                "error_msg": result["error"],
+                "edition_label": "Java" if is_java else "Bedrock",
+            }
+
         if is_java:
             version_info = result.get("version", {})
             players_info = result.get("players", {})
             description = result.get("description", "无描述")
-            
-            motd_text = self._format_motd(description)
-            
-            # 使用增强的版本解析（支持 ViaVersion/Velocity/BungeeCord）
             version_display, protocol_display, via_hint = self._parse_version(version_info)
-            
+            motd_html = self._motd_to_html(description)
             online = players_info.get("online", 0)
             max_players = players_info.get("max", 0)
-            
             sample = players_info.get("sample", [])
-            player_list = ""
-            if sample:
-                player_names = [p.get("name", "未知") for p in sample[:10]]
-                player_list = "\n在线玩家: " + ", ".join(player_names)
-                if len(sample) > 10:
-                    player_list += f" 等共 {len(sample)} 人"
-            
-            # 构建版本信息行
-            version_line = f"📋 版本: {version_display}"
-            version_line += f" (协议 {protocol_display})"
-
-            # 代理/多版本提示
-            via_line = f"\n🔄 {via_hint}" if via_hint else ""
-            
-            response = (
-                f"🎮 Minecraft 服务器状态\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"📍 地址: {server_address}\n"
-                f"{version_line}{via_line}\n"
-                f"👥 玩家: {online}/{max_players}{player_list}\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"📝 MOTD:\n{motd_text}"
-            )
+            player_list = [p.get("name", "未知") for p in sample[:10]] if sample else []
+            extra_count = len(sample) - 10 if len(sample) > 10 else 0
+            return {
+                "is_error": False, "is_java": True,
+                "server_address": server_address,
+                "edition_label": "Java",
+                "version_display": version_display,
+                "protocol_display": protocol_display,
+                "via_hint": via_hint,
+                "online": online, "max_players": max_players,
+                "player_list": player_list, "extra_count": extra_count,
+                "motd_html": motd_html,
+            }
         else:
-            response = (
-                f"🎮 Minecraft 基岩版服务器状态\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"📍 地址: {server_address}\n"
-                f"📋 版本: {result.get('version', '未知')}\n"
-                f"👥 玩家: {result.get('online_players', 0)}/{result.get('max_players', 0)}\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"📝 MOTD:\n{result.get('motd', '无描述')}"
-            )
-        
-        return response
-    
+            motd_html = self._motd_to_html(result.get("motd", "无描述"))
+            return {
+                "is_error": False, "is_java": False,
+                "server_address": server_address,
+                "edition_label": "Bedrock",
+                "version_display": result.get("version", "未知"),
+                "online": result.get("online_players", 0),
+                "max_players": result.get("max_players", 0),
+                "player_list": [], "extra_count": 0,
+                "motd_html": motd_html,
+            }
+
     async def _do_motd_query(self, event: AstrMessageEvent, server: str = "", is_java: bool = True):
         """执行 MOTD 查询的核心逻辑"""
         logger.info(f"[MOTD] 开始查询: server='{server}', is_java={is_java}")
@@ -663,9 +832,19 @@ class MOTDPlugin(Star):
             logger.error(f"[MOTD] 查询异常: {e}")
             result = {"error": f"查询异常: {str(e)}"}
         
-        # 格式化并发送结果
-        response = self._format_response(result, server_address, is_java=is_java)
-        await event.send(event.plain_result(response))
+        # 格式化并渲染为图片
+        context = self._format_response(result, server_address, is_java=is_java)
+        try:
+            url = await self.html_render(MOTD_HTML_TEMPLATE, context, options={"full_page": True})
+            await event.send(event.image_result(url))
+        except Exception as e:
+            logger.error(f"[MOTD] 图片渲染失败，回退到纯文本: {e}")
+            # 回退：纯文本输出
+            if context.get("is_error"):
+                text = f"❌ 查询失败\n服务器: {server_address}\n错误: {context.get('error_msg', '未知')}"
+            else:
+                text = f"🎮 服务器: {server_address}\n版本: {context.get('version_display', '?')}\n玩家: {context.get('online', 0)}/{context.get('max_players', 0)}"
+            await event.send(event.plain_result(text))
         logger.info("[MOTD] 查询流程完成")
 
     @filter.event_message_type(filter.EventMessageType.ALL)
