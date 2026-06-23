@@ -2,6 +2,8 @@
 
 一个用于查询 Minecraft 服务器状态的 AstrBot 插件，支持 Java 版和基岩版服务器，**完美兼容 ViaVersion 多版本服务器**。
 
+![插件预览](assets/preview.png)
+
 ## 功能特性
 
 - ✅ **MOTD 查询**: 查询 Minecraft 服务器的 MOTD、在线玩家、版本等信息
