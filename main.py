@@ -368,18 +368,10 @@ async def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, time
 MOTD_HTML_TEMPLATE = '''
 <style>
 body {
-    margin: 0; padding: 24px;
+    margin: 0; padding: 28px 32px;
     background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
     font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
-}
-.card {
-    background: rgba(255,255,255,0.05);
-    backdrop-filter: blur(10px);
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 16px;
-    padding: 28px 32px;
     color: #e0e0e0;
-    width: 460px;
 }
 .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
 .title { font-size: 22px; font-weight: 700; color: #fff; }
@@ -414,21 +406,18 @@ body {
     color: #e0e0e0; word-break: break-all;
 }
 .footer { margin-top: 16px; text-align: right; font-size: 11px; color: rgba(255,255,255,0.25); }
-.error-card {
-    background: rgba(255,85,85,0.08); border-color: rgba(255,85,85,0.2);
-}
-.error-card .title { color: #ff5555; }
+.title-error { color: #ff5555; }
 .error-msg {
     background: rgba(255,85,85,0.1); border-radius: 10px;
     padding: 14px 18px; font-size: 14px; color: #ff8888;
 }
 </style>
 
-<div class="card {% if is_error %}error-card{% endif %}">
+<div>
 
   {% if is_error %}
   <div class="header">
-    <span class="title">❌ 查询失败</span>
+    <span class="title title-error">❌ 查询失败</span>
     <span class="badge badge-bedrock">{{ edition_label }}</span>
   </div>
   <div class="row"><span class="icon">📍</span><span class="label">服务器</span><span class="value">{{ server_address }}</span></div>
@@ -485,7 +474,7 @@ body {
 '''
 
 
-@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.3.0")
+@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.3.1")
 class MOTDPlugin(Star):
     """MOTD 查询插件主类"""
     
