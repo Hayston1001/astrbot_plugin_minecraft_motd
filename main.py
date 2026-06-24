@@ -368,52 +368,48 @@ async def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, time
 MOTD_HTML_TEMPLATE = '''
 <style>
 body {
-    margin: 0; padding: 28px 32px;
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+    margin: 0; padding: 0;
     font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
     color: #e0e0e0;
 }
-.header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
-.title { font-size: 22px; font-weight: 700; color: #fff; }
+.card {
+    padding: 40px 48px;
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+    display: inline-block;
+    min-width: 640px;
+}
+.header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+.title { font-size: 28px; font-weight: 700; color: #fff; }
 .badge {
-    font-size: 12px; font-weight: 600;
-    padding: 3px 12px; border-radius: 20px;
+    font-size: 14px; font-weight: 600;
+    padding: 4px 16px; border-radius: 20px;
     background: rgba(85,255,85,0.15); color: #55ff55; border: 1px solid rgba(85,255,85,0.3);
 }
 .badge-bedrock {
     background: rgba(255,170,0,0.15); color: #ffaa00; border-color: rgba(255,170,0,0.3);
 }
-.divider { height: 1px; background: rgba(255,255,255,0.08); margin: 16px 0; }
-.row { display: flex; align-items: center; margin-bottom: 10px; font-size: 15px; }
-.row .icon { margin-right: 10px; }
-.row .label { color: #8899aa; min-width: 65px; }
+.divider { height: 1px; background: rgba(255,255,255,0.08); margin: 20px 0; }
+.row { display: flex; align-items: center; margin-bottom: 14px; font-size: 18px; }
+.row .icon { margin-right: 12px; }
+.row .label { color: #8899aa; min-width: 80px; }
 .row .value { color: #fff; font-weight: 500; flex: 1; }
-.via-hint { font-size: 12px; color: #ffaa00; margin-left: 8px; }
-.player-section { margin-top: 4px; }
-.player-title { font-size: 13px; color: #8899aa; margin-bottom: 6px; }
-.player-list {
-    display: flex; flex-wrap: wrap; gap: 6px;
-}
-.player-tag {
-    font-size: 12px; padding: 2px 10px;
-    background: rgba(255,255,255,0.08); border-radius: 12px; color: #ccc;
-}
-.motd-section { margin-top: 4px; }
-.motd-label { font-size: 13px; color: #8899aa; margin-bottom: 6px; }
+.via-hint { font-size: 14px; color: #ffaa00; margin-left: 10px; }
+.motd-section { margin-top: 6px; }
+.motd-label { font-size: 16px; color: #8899aa; margin-bottom: 8px; }
 .motd-box {
     background: rgba(0,0,0,0.25); border-radius: 10px;
-    padding: 14px 18px; font-size: 14px; line-height: 1.7;
+    padding: 18px 22px; font-size: 16px; line-height: 1.7;
     color: #e0e0e0; word-break: break-all;
 }
-.footer { margin-top: 16px; text-align: right; font-size: 11px; color: rgba(255,255,255,0.25); }
+.footer { margin-top: 20px; text-align: right; font-size: 13px; color: rgba(255,255,255,0.25); }
 .title-error { color: #ff5555; }
 .error-msg {
     background: rgba(255,85,85,0.1); border-radius: 10px;
-    padding: 14px 18px; font-size: 14px; color: #ff8888;
+    padding: 18px 22px; font-size: 16px; color: #ff8888;
 }
 </style>
 
-<div>
+<div class="card">
 
   {% if is_error %}
   <div class="header">
@@ -433,7 +429,7 @@ body {
 
   <div class="row">
     <span class="icon">📋</span><span class="label">版本</span>
-    <span class="value">{{ version_display }} <span style="color:#8899aa;font-size:13px">(协议 {{ protocol_display|default('--') }})</span></span>
+    <span class="value">{{ version_display }} <span style="color:#8899aa;font-size:15px">(协议 {{ protocol_display|default('--') }})</span></span>
   </div>
 
   {% if via_hint %}
@@ -442,23 +438,8 @@ body {
 
   <div class="row">
     <span class="icon">👥</span><span class="label">玩家</span>
-    <span class="value">
-      {{ online }} / {{ max_players }}
-      <span style="font-size:13px;margin-left:8px;background:rgba({{ '85,255,85' if online > 0 else '255,85,85' }},0.15);
-            padding:1px 8px;border-radius:10px;color:{{ '#55ff55' if online > 0 else '#ff5555' }}">
-        ● {{ '在线' if online > 0 else '离线' }}
-      </span>
-    </span>
+    <span class="value">{{ online }} / {{ max_players }}</span>
   </div>
-
-  {% if player_list %}
-  <div class="player-section">
-    <div class="player-title">在线玩家 ({{ player_list|length }}{% if extra_count > 0 %}+{{ extra_count }}{% endif %})</div>
-    <div class="player-list">
-      {% for p in player_list %}<span class="player-tag">{{ p }}</span>{% endfor %}
-    </div>
-  </div>
-  {% endif %}
 
   <div class="divider"></div>
 
@@ -474,7 +455,7 @@ body {
 '''
 
 
-@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.3.1")
+@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.4.0")
 class MOTDPlugin(Star):
     """MOTD 查询插件主类"""
     
@@ -482,7 +463,7 @@ class MOTDPlugin(Star):
         super().__init__(context)
         self.config = config
         self._load_config()
-        logger.info(f"[MOTD] 插件初始化完成，版本 1.2.0")
+        logger.info(f"[MOTD] 插件初始化完成，版本 1.4.0")
     
     def _load_config(self):
         """加载插件配置"""
@@ -987,7 +968,7 @@ class MOTDPlugin(Star):
     async def on_astrbot_loaded(self):
         """Bot 初始化完成时"""
         logger.info("=" * 50)
-        logger.info("[MOTD] 插件已加载 v1.2.0")
+        logger.info("[MOTD] 插件已加载 v1.4.0")
         logger.info("[MOTD] 支持 ViaVersion/Velocity/BungeeCord 多版本兼容")
         logger.info(f"[MOTD] 默认服务器: {self.default_server}:{self.default_port if self.default_server else '未设置'}")
         logger.info(f"[MOTD] 对所有会话生效: {self.enable_all_sessions}")
