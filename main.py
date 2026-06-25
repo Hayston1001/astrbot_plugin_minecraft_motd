@@ -188,19 +188,27 @@ async def query_java_server_api(host: str, port: int = JAVA_DEFAULT_PORT) -> Dic
                         version_name_raw = version_data.get("name_raw") or version_data.get("name_clean") or version_data.get("name", "")
                         protocol_raw = version_data.get("protocol")
 
+                        logger.info(f"[MOTD] API 返回原始数据: version.name_raw='{version_data.get('name_raw')}', "
+                                    f"version.name_clean='{version_data.get('name_clean')}', "
+                                    f"version.name='{version_data.get('name')}', "
+                                    f"version.protocol={protocol_raw}")
+
                         # API 返回 protocol: null 时，尝试从版本名反查协议号
                         if protocol_raw is None:
+                            logger.info(f"[MOTD] API 返回 protocol=null，尝试从版本名反查")
                             protocol_raw = _lookup_protocol_from_name(version_name_raw)
                             if protocol_raw is not None:
-                                logger.info(f"[MOTD] API 未返回协议号，从版本名 '{version_name_raw}' 反查到协议 {protocol_raw}")
+                                logger.info(f"[MOTD] 从版本名 '{version_name_raw}' 反查到协议 {protocol_raw}")
                             else:
                                 # 反查失败，尝试直连查询补全协议号
-                                logger.info(f"[MOTD] API 未返回协议号，尝试直连查询补全")
+                                logger.info(f"[MOTD] 版本名反查失败，尝试直连查询补全")
                                 direct = await query_java_server_direct(host, port)
                                 if "error" not in direct and "version" in direct:
                                     protocol_raw = direct["version"].get("protocol")
                                     if protocol_raw is not None:
                                         logger.info(f"[MOTD] 直连查询补全协议号: {protocol_raw}")
+                                    else:
+                                        logger.info(f"[MOTD] 直连查询也未返回协议号")
 
                         return {
                             "version": {"name": version_name_raw, "protocol": protocol_raw if protocol_raw is not None else 0},
@@ -310,14 +318,18 @@ async def query_java_server(host: str, port: int = JAVA_DEFAULT_PORT, timeout: i
     # 直连返回协议号 ≤ 0（代理/多版本服务器），补查 API 获取带范围的版本名
     if "error" not in result:
         proto = result.get("version", {}).get("protocol", 0)
+        version_name = result.get("version", {}).get("name", "")
+        logger.info(f"[MOTD] 直连查询结果: protocol={proto}, name='{version_name}'")
         if proto is not None and proto <= 0:
-            logger.info(f"[MOTD] 直连协议号 {proto}，补查 API 获取版本范围")
+            logger.info(f"[MOTD] 直连协议号 {proto} ≤ 0，补查 API 获取版本范围")
             api_result = await query_java_server_api(host, port)
             if "error" not in api_result:
                 api_name = api_result.get("version", {}).get("name", "")
-                if api_name and api_name != result.get("version", {}).get("name", ""):
+                if api_name and api_name != version_name:
                     result["version"]["name"] = api_name
-                    logger.info(f"[MOTD] API 补全版本名: {api_name}")
+                    logger.info(f"[MOTD] API 补全版本名: '{version_name}' -> '{api_name}'")
+                else:
+                    logger.info(f"[MOTD] API 版本名相同或为空，无需补全")
 
     return result
 
@@ -364,9 +376,11 @@ async def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, time
 
 # ============================================================
 # HTML 模板：MOTD 服务器状态卡片
+# Minecraft 游戏内 UI 风格
 # ============================================================
 MOTD_HTML_TEMPLATE = '''
 <style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap');
 html, body {
     margin: 0; padding: 0;
     height: 100%;
@@ -375,123 +389,182 @@ body {
     font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
     color: #e0e0e0;
     width: 100%;
-    display: flex;
+    height: 100%;
+    margin: 0;
+    padding: 0;
 }
 .card {
-    padding: 40px 48px;
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+    padding: 32px;
+    background: #2D2D2D;
     width: 100%;
-    min-width: 640px;
+    height: 100%;
     box-sizing: border-box;
-    flex: 1;
     display: flex;
     flex-direction: column;
+    border: 3px solid #555;
+    box-shadow: inset 0 0 0 1px #444;
 }
 .header {
     display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 40px;
+    align-items: baseline;
+    gap: 16px;
+    margin-bottom: 32px;
     padding-bottom: 20px;
-    border-bottom: 2px solid rgba(255,255,255,0.1);
+    border-bottom: 2px solid #444;
 }
-.title {
-    font-size: 36px;
+.server-name {
+    font-size: 72px;
     font-weight: 700;
     color: #fff;
-    text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .badge {
-    font-size: 16px; font-weight: 600;
-    padding: 6px 20px; border-radius: 20px;
-    background: rgba(85,255,85,0.15); color: #55ff55; border: 1px solid rgba(85,255,85,0.3);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 28px;
+    font-weight: 600;
+    padding: 6px 14px;
+    background: #3C3C3C;
+    color: #aaa;
+    border: 1px solid #555;
+}
+.badge-java {
+    color: #55ff55;
+    border-color: #55ff55;
 }
 .badge-bedrock {
-    background: rgba(255,170,0,0.15); color: #ffaa00; border-color: rgba(255,170,0,0.3);
+    color: #ffaa00;
+    border-color: #ffaa00;
 }
-.info-section {
-    flex: 1;
+.stats-row {
     display: flex;
-    flex-direction: column;
-    justify-content: space-around;
-}
-.divider { height: 2px; background: rgba(255,255,255,0.1); margin: 30px 0; }
-.row {
-    display: flex;
-    align-items: center;
+    gap: 24px;
     margin-bottom: 24px;
-    font-size: 20px;
-    padding: 12px 0;
 }
-.row .icon {
-    margin-right: 16px;
-    font-size: 24px;
-    width: 30px;
-    text-align: center;
+.stat-box {
+    flex: 1;
+    background: #333;
+    padding: 28px 32px;
+    border: 2px solid #444;
+    position: relative;
 }
-.row .label {
-    color: #8899aa;
-    min-width: 100px;
-    font-size: 16px;
+.stat-box::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: #55ff55;
+}
+.stat-label {
+    font-size: 28px;
+    color: #777;
     text-transform: uppercase;
-    letter-spacing: 1px;
+    letter-spacing: 2px;
+    margin-bottom: 12px;
 }
-.row .value {
+.stat-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 128px;
+    font-weight: 700;
+    color: #fff;
+}
+.stat-value.players-num {
+    color: #55ff55;
+}
+.stat-value .fraction {
+    font-size: 64px;
+    color: #666;
+}
+.stat-main {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 32px;
+}
+.players-section {
+    flex: 1;
+}
+.version-section {
+    text-align: right;
+}
+.version-label {
+    font-size: 22px;
+    color: #666;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin-bottom: 6px;
+}
+.version-text {
+    font-size: 40px;
     color: #fff;
     font-weight: 600;
-    flex: 1;
-    font-size: 22px;
 }
-.via-hint {
-    font-size: 16px;
+.version-protocol {
+    font-size: 26px;
+    color: #666;
+    margin-top: 4px;
+}
+.via-tag {
+    display: inline-block;
+    font-size: 24px;
     color: #ffaa00;
-    margin-left: 10px;
-    background: rgba(255,170,0,0.1);
-    padding: 4px 12px;
-    border-radius: 6px;
+    background: rgba(255,170,0,0.15);
+    padding: 3px 8px;
+    margin-top: 6px;
+    border: 1px solid rgba(255,170,0,0.3);
 }
 .motd-section {
-    margin-top: 30px;
+    flex: 1;
+    background: #1a1a1a;
+    border: 2px solid #444;
+    padding: 24px;
+    position: relative;
+}
+.motd-content {
+    font-size: 22px;
+    line-height: 1.7;
+    color: #ccc;
+    word-break: break-all;
+}
+.footer {
+    margin-top: 24px;
+    display: flex;
+    justify-content: space-between;
+    font-size: 24px;
+    color: #555;
+}
+.footer-line {
+    flex: 1;
+    height: 1px;
+    background: #444;
+    align-self: center;
+    margin: 0 16px;
+}
+.title-error { color: #ff5555; }
+.error-container {
     flex: 1;
     display: flex;
     flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 20px;
 }
-.motd-label {
-    font-size: 18px;
-    color: #8899aa;
-    margin-bottom: 12px;
-    text-transform: uppercase;
-    letter-spacing: 1px;
+.error-icon {
+    font-size: 48px;
+    opacity: 0.8;
 }
-.motd-box {
-    background: rgba(0,0,0,0.3);
-    border-radius: 12px;
-    padding: 24px;
-    font-size: 20px;
-    line-height: 1.8;
-    color: #e0e0e0;
-    word-break: break-all;
-    flex: 1;
-    border: 1px solid rgba(255,255,255,0.05);
-}
-.footer {
-    margin-top: auto;
-    text-align: right;
-    font-size: 14px;
-    color: rgba(255,255,255,0.3);
-    padding-top: 30px;
-    border-top: 1px solid rgba(255,255,255,0.05);
-}
-.title-error { color: #ff5555; }
 .error-msg {
-    background: rgba(255,85,85,0.1); border-radius: 10px;
-    padding: 18px 22px; font-size: 16px; color: #ff8888;
-}
-.highlight {
-    background: linear-gradient(135deg, rgba(85,255,85,0.1) 0%, rgba(85,255,255,0.1) 100%);
-    padding: 8px 16px;
-    border-radius: 8px;
-    border-left: 3px solid #55ff55;
+    background: rgba(255,85,85,0.1);
+    padding: 16px 24px;
+    font-size: 16px;
+    color: #ff8888;
+    text-align: center;
+    border: 2px solid rgba(255,85,85,0.3);
+    max-width: 400px;
 }
 </style>
 
@@ -499,53 +572,55 @@ body {
 
   {% if is_error %}
   <div class="header">
-    <span class="title title-error">❌ 查询失败</span>
+    <span class="server-name title-error">连接失败</span>
     <span class="badge badge-bedrock">{{ edition_label }}</span>
   </div>
-  <div class="info-section">
-    <div class="row highlight"><span class="icon">📍</span><span class="label">服务器</span><span class="value">{{ server_address }}</span></div>
+  <div class="error-container">
+    <div class="error-icon">✖</div>
+    <div class="error-msg">{{ error_msg }}</div>
+    <div style="font-size: 13px; color: #666;">{{ server_address }}</div>
   </div>
-  <div class="error-msg">{{ error_msg }}</div>
 
   {% else %}
   <div class="header">
-    <span class="title">🎮 服务器状态</span>
-    <span class="badge {% if not is_java %}badge-bedrock{% endif %}">{{ edition_label }}</span>
+    <span class="server-name">{{ server_address }}</span>
+    <span class="badge {% if is_java %}badge-java{% else %}badge-bedrock{% endif %}">{{ edition_label }}</span>
   </div>
 
-  <div class="info-section">
-    <div class="row highlight"><span class="icon">📍</span><span class="label">地址</span><span class="value">{{ server_address }}</span></div>
-
-    <div class="row">
-      <span class="icon">📋</span><span class="label">版本</span>
-      <span class="value">{{ version_display }} <span style="color:#8899aa;font-size:16px">(协议 {{ protocol_display|default('--') }})</span></span>
-    </div>
-
-    {% if via_hint %}
-    <div class="row"><span class="icon">🔄</span><span class="label">兼容</span><span class="value"><span class="via-hint">{{ via_hint }}</span></span></div>
-    {% endif %}
-
-    <div class="row highlight">
-      <span class="icon">👥</span><span class="label">玩家</span>
-      <span class="value">{{ online }} / {{ max_players }}</span>
+  <div class="stat-box">
+    <div class="stat-label">在线玩家</div>
+    <div class="stat-main">
+      <div class="players-section">
+        <div class="stat-value players-num">{{ online }}<span class="fraction">/{{ max_players }}</span></div>
+      </div>
+      <div class="version-section">
+        <div class="version-label">服务器版本</div>
+        <div class="version-text">{{ server_version }}</div>
+        {% if client_version and client_version != server_version %}
+        <div class="version-label" style="margin-top: 12px;">客户端版本</div>
+        <div class="version-text" style="font-size: 32px;">{{ client_version }}</div>
+        {% endif %}
+        {% if via_hint %}<div class="via-tag">{{ via_hint }}</div>{% endif %}
+      </div>
     </div>
   </div>
-
-  <div class="divider"></div>
 
   <div class="motd-section">
-    <div class="motd-label">MOTD</div>
-    <div class="motd-box">{{ motd_html }}</div>
+    <div class="motd-content">{{ motd_html }}</div>
   </div>
 
-  <div class="footer">Minecraft 服务器 motd 查询 · Hayston1001</div>
+  <div class="footer">
+    <span>MOTD 查询</span>
+    <div class="footer-line"></div>
+    <span>Hayston1001</span>
+  </div>
   {% endif %}
 
 </div>
 '''
 
 
-@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.4.1")
+@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.5.0")
 class MOTDPlugin(Star):
     """MOTD 查询插件主类"""
     
@@ -553,7 +628,7 @@ class MOTDPlugin(Star):
         super().__init__(context)
         self.config = config
         self._load_config()
-        logger.info(f"[MOTD] 插件初始化完成，版本 1.4.1")
+        logger.info(f"[MOTD] 插件初始化完成，版本 1.5.0")
     
     def _load_config(self):
         """加载插件配置"""
@@ -630,7 +705,7 @@ class MOTDPlugin(Star):
     def _parse_version(self, version_info: Dict[str, Any]) -> Tuple[str, str, str]:
         """
         解析版本信息，支持 ViaVersion/Velocity/BungeeCord 等多版本兼容模式
-        返回: (版本显示文本, 协议显示文本, 代理/多版本提示)
+        返回: (服务器版本, 支持的客户端版本, 代理/多版本提示)
         """
         version_name = (version_info.get("name") or "").strip()
 
@@ -641,12 +716,15 @@ class MOTDPlugin(Star):
         except (ValueError, TypeError):
             protocol = 0
 
+        logger.info(f"[MOTD] 版本解析输入: name='{version_name}', protocol_raw={protocol_raw}, protocol={protocol}")
+
         # ── 1. 从版本名提取版本号 ──
         version_in_name = None
         if version_name:
             m = _VERSION_RE.search(version_name)
             if m:
                 version_in_name = m.group(1)
+                logger.info(f"[MOTD] 从版本名提取版本号: '{version_in_name}'")
 
         # ── 1.5 协议号无效时，从版本名反查 ──
         if protocol <= 0 and version_name:
@@ -654,13 +732,18 @@ class MOTDPlugin(Star):
             if looked_up is not None:
                 logger.info(f"[MOTD] 协议号无效({protocol})，从版本名 '{version_name}' 反查到协议 {looked_up}")
                 protocol = looked_up
+            else:
+                logger.info(f"[MOTD] 协议号无效({protocol})，从版本名 '{version_name}' 反查失败")
 
         # ── 2. 用协议号查服务器实际版本 ──
         proto_ver_display, proto_major = PROTOCOL_VERSION_MAP.get(protocol, ("", ""))
+        if protocol > 0:
+            logger.info(f"[MOTD] 协议号映射: {protocol} -> display='{proto_ver_display}', major='{proto_major}'")
 
         # ── 3. 代理/多版本检测 ──
         proxy_name = ""
         is_multi_version = False
+        detect_reason = ""
 
         name_lower = version_name.lower()
 
@@ -669,18 +752,25 @@ class MOTDPlugin(Star):
             if kw in name_lower:
                 proxy_name = display_name
                 is_multi_version = True
+                detect_reason = f"关键词匹配: '{kw}'"
+                logger.info(f"[MOTD] 代理检测命中: '{kw}' -> {display_name}")
                 break
 
         # 3b. 版本名包含范围格式（如 "1.7.2-1.21.11"、"1.8 - 26.1"、"1.8 / 1.21"）
         if not is_multi_version and version_name:
-            if re.search(r'\d+\.\d+[\w.]*\s*[-~–/]\s*\d+\.\d+', version_name):
+            range_match = re.search(r'(\d+\.\d+[\w.]*)\s*[-~–/]\s*(\d+\.\d+)', version_name)
+            if range_match:
                 is_multi_version = True
+                detect_reason = f"范围格式: '{range_match.group(0)}'"
+                logger.info(f"[MOTD] 多版本检测命中范围格式: '{range_match.group(0)}'")
 
         # 3c. 版本名列出多个版本（如 "1.7.x, 1.8.x, ..., 1.21.x"）
         if not is_multi_version and version_name:
             version_matches = _VERSION_RE.findall(version_name)
             if len(version_matches) >= 4:
                 is_multi_version = True
+                detect_reason = f"多版本列举: {len(version_matches)}个版本"
+                logger.info(f"[MOTD] 多版本检测命中列举: {version_matches}")
 
         # 3d. 协议号 47 + 版本名提及高版本 → BungeeCord/Velocity
         if not is_multi_version and protocol == 47 and version_in_name:
@@ -688,10 +778,16 @@ class MOTDPlugin(Star):
                 ver_parts = [int(x) for x in version_in_name.split('.')]
                 if len(ver_parts) >= 2 and (ver_parts[0] > 1 or (ver_parts[0] == 1 and ver_parts[1] > 8)):
                     is_multi_version = True
+                    detect_reason = f"协议47+高版本名: '{version_in_name}'"
+                    logger.info(f"[MOTD] 多版本检测命中协议47+高版本: proto=47, version='{version_in_name}'")
             except (ValueError, IndexError):
                 pass
 
-        # ── 4. 从版本名解析支持范围上限 ──
+        if not is_multi_version:
+            logger.info(f"[MOTD] 未检测到多版本/代理")
+
+        # ── 4. 从版本名解析支持范围 ──
+        min_supported_version = ""
         max_supported_version = ""
         if is_multi_version and version_name:
             all_versions = _VERSION_RE.findall(version_name)
@@ -709,35 +805,34 @@ class MOTDPlugin(Star):
                             mc_versions.append(v)
                     except ValueError:
                         pass
+            logger.info(f"[MOTD] 版本范围解析: all_versions={all_versions}, mc_versions={mc_versions}")
             if mc_versions:
                 max_supported_version = max(mc_versions, key=lambda v: [int(x) for x in v.split('.') if x.isdigit()])
+                min_supported_version = min(mc_versions, key=lambda v: [int(x) for x in v.split('.') if x.isdigit()])
 
         # ── 5. 构建显示结果 ──
         if is_multi_version:
-            # 多版本兼容服务器
-            base_version = proto_ver_display or version_in_name or "未知"
-            if max_supported_version and max_supported_version != base_version:
-                # 清理 base_version 中的 .x 后缀以便统一显示
-                base_clean = base_version.replace('.x', '')
-                version_display = f"{base_clean} → 支持至 {max_supported_version}"
+            # 多版本兼容服务器：服务器版本用协议号映射，客户端版本显示支持范围
+            server_version = proto_ver_display or version_in_name or "未知"
+            if min_supported_version and max_supported_version and min_supported_version != max_supported_version:
+                client_version = f"{min_supported_version} ~ {max_supported_version}"
+            elif max_supported_version:
+                client_version = f"≤ {max_supported_version}"
             else:
-                version_display = f"多版本兼容 ({version_name})" if version_name else "多版本兼容"
+                client_version = version_name if version_name else "未知"
         elif version_name and version_name not in ("", "未知", "Unknown"):
             # 普通服务器，有版本名
-            version_display = version_name
+            server_version = version_name
+            client_version = version_name
         elif protocol > 0:
             # 用协议号推断
-            version_display = proto_ver_display or f"协议 {protocol}"
+            server_version = proto_ver_display or "未知"
+            client_version = server_version
         else:
-            version_display = "未知"
+            server_version = "未知"
+            client_version = "未知"
 
-        # ── 6. 协议显示 ──
-        if protocol <= 0:
-            protocol_display = "未知"
-        else:
-            protocol_display = str(protocol)
-
-        # ── 7. 代理/多版本提示 ──
+        # ── 6. 代理/多版本提示 ──
         if is_multi_version:
             if proxy_name:
                 via_hint = f"检测到: {proxy_name} 代理"
@@ -746,10 +841,10 @@ class MOTDPlugin(Star):
         else:
             via_hint = ""
 
-        logger.info(f"[MOTD] 版本解析: name='{version_name}', proto={protocol}, "
-                     f"display='{version_display}', hint='{via_hint}'")
+        logger.info(f"[MOTD] 版本解析输出: server='{server_version}', client='{client_version}', "
+                     f"via_hint='{via_hint}', is_multi_version={is_multi_version}, detect_reason='{detect_reason}'")
 
-        return version_display, protocol_display, via_hint
+        return server_version, client_version, via_hint
 
     def _motd_to_html(self, motd_data: Any) -> str:
         """将 MOTD 数据转换为带颜色的 HTML，支持 § 颜色码和 JSON 格式"""
@@ -797,6 +892,7 @@ class MOTDPlugin(Star):
     def _format_response(self, result: Dict[str, Any], server_address: str, is_java: bool = True) -> Dict[str, Any]:
         """格式化查询结果为 HTML 模板上下文字典"""
         if "error" in result:
+            logger.info(f"[MOTD] 格式化错误结果: server='{server_address}', error='{result['error']}'")
             return {
                 "is_error": True, "is_java": is_java,
                 "server_address": server_address,
@@ -808,19 +904,26 @@ class MOTDPlugin(Star):
             version_info = result.get("version", {})
             players_info = result.get("players", {})
             description = result.get("description", "无描述")
-            version_display, protocol_display, via_hint = self._parse_version(version_info)
+
+            logger.info(f"[MOTD] Java 版原始数据: version={version_info}, players={players_info}")
+
+            server_version, client_version, via_hint = self._parse_version(version_info)
             motd_html = self._motd_to_html(description)
             online = players_info.get("online", 0)
             max_players = players_info.get("max", 0)
             sample = players_info.get("sample", [])
             player_list = [p.get("name", "未知") for p in sample[:10]] if sample else []
             extra_count = len(sample) - 10 if len(sample) > 10 else 0
+
+            logger.info(f"[MOTD] 格式化结果: server_version='{server_version}', client_version='{client_version}', "
+                        f"players={online}/{max_players}, via_hint='{via_hint}'")
+
             return {
                 "is_error": False, "is_java": True,
                 "server_address": server_address,
                 "edition_label": "Java",
-                "version_display": version_display,
-                "protocol_display": protocol_display,
+                "server_version": server_version,
+                "client_version": client_version,
                 "via_hint": via_hint,
                 "online": online, "max_players": max_players,
                 "player_list": player_list, "extra_count": extra_count,
@@ -828,13 +931,21 @@ class MOTDPlugin(Star):
             }
         else:
             motd_html = self._motd_to_html(result.get("motd", "无描述"))
+            server_version = result.get("version", "未知")
+            online = result.get("online_players", 0)
+            max_players = result.get("max_players", 0)
+
+            logger.info(f"[MOTD] 基岩版原始数据: {result}")
+            logger.info(f"[MOTD] 基岩版格式化结果: version='{server_version}', players={online}/{max_players}")
+
             return {
                 "is_error": False, "is_java": False,
                 "server_address": server_address,
                 "edition_label": "Bedrock",
-                "version_display": result.get("version", "未知"),
-                "online": result.get("online_players", 0),
-                "max_players": result.get("max_players", 0),
+                "server_version": server_version,
+                "client_version": server_version,
+                "online": online,
+                "max_players": max_players,
                 "player_list": [], "extra_count": 0,
                 "motd_html": motd_html,
             }
@@ -903,7 +1014,7 @@ class MOTDPlugin(Star):
             if context.get("is_error"):
                 text = f"❌ 查询失败\n服务器: {server_address}\n错误: {context.get('error_msg', '未知')}"
             else:
-                text = f"🎮 服务器: {server_address}\n版本: {context.get('version_display', '?')}\n玩家: {context.get('online', 0)}/{context.get('max_players', 0)}"
+                text = f"🎮 服务器: {server_address}\n版本: {context.get('server_version', '?')}\n玩家: {context.get('online', 0)}/{context.get('max_players', 0)}"
             await event.send(event.plain_result(text))
         logger.info("[MOTD] 查询流程完成")
 
@@ -1058,7 +1169,7 @@ class MOTDPlugin(Star):
     async def on_astrbot_loaded(self):
         """Bot 初始化完成时"""
         logger.info("=" * 50)
-        logger.info("[MOTD] 插件已加载 v1.4.1")
+        logger.info("[MOTD] 插件已加载 v1.5.0")
         logger.info("[MOTD] 支持 ViaVersion/Velocity/BungeeCord 多版本兼容")
         logger.info(f"[MOTD] 默认服务器: {self.default_server}:{self.default_port if self.default_server else '未设置'}")
         logger.info(f"[MOTD] 对所有会话生效: {self.enable_all_sessions}")
