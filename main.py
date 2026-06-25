@@ -371,6 +371,7 @@ body {
     margin: 0; padding: 0;
     font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
     color: #e0e0e0;
+    display: inline-block;
 }
 .card {
     padding: 40px 48px;
