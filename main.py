@@ -367,46 +367,131 @@ async def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, time
 # ============================================================
 MOTD_HTML_TEMPLATE = '''
 <style>
-body {
+html, body {
     margin: 0; padding: 0;
+    height: 100%;
+}
+body {
     font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
     color: #e0e0e0;
-    display: inline-block;
+    width: 100%;
+    display: flex;
 }
 .card {
     padding: 40px 48px;
     background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-    display: inline-block;
+    width: 100%;
     min-width: 640px;
+    box-sizing: border-box;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
 }
-.header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
-.title { font-size: 28px; font-weight: 700; color: #fff; }
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 40px;
+    padding-bottom: 20px;
+    border-bottom: 2px solid rgba(255,255,255,0.1);
+}
+.title {
+    font-size: 36px;
+    font-weight: 700;
+    color: #fff;
+    text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+}
 .badge {
-    font-size: 14px; font-weight: 600;
-    padding: 4px 16px; border-radius: 20px;
+    font-size: 16px; font-weight: 600;
+    padding: 6px 20px; border-radius: 20px;
     background: rgba(85,255,85,0.15); color: #55ff55; border: 1px solid rgba(85,255,85,0.3);
 }
 .badge-bedrock {
     background: rgba(255,170,0,0.15); color: #ffaa00; border-color: rgba(255,170,0,0.3);
 }
-.divider { height: 1px; background: rgba(255,255,255,0.08); margin: 20px 0; }
-.row { display: flex; align-items: center; margin-bottom: 14px; font-size: 18px; }
-.row .icon { margin-right: 12px; }
-.row .label { color: #8899aa; min-width: 80px; }
-.row .value { color: #fff; font-weight: 500; flex: 1; }
-.via-hint { font-size: 14px; color: #ffaa00; margin-left: 10px; }
-.motd-section { margin-top: 6px; }
-.motd-label { font-size: 16px; color: #8899aa; margin-bottom: 8px; }
-.motd-box {
-    background: rgba(0,0,0,0.25); border-radius: 10px;
-    padding: 18px 22px; font-size: 16px; line-height: 1.7;
-    color: #e0e0e0; word-break: break-all;
+.info-section {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-around;
 }
-.footer { margin-top: 20px; text-align: right; font-size: 13px; color: rgba(255,255,255,0.25); }
+.divider { height: 2px; background: rgba(255,255,255,0.1); margin: 30px 0; }
+.row {
+    display: flex;
+    align-items: center;
+    margin-bottom: 24px;
+    font-size: 20px;
+    padding: 12px 0;
+}
+.row .icon {
+    margin-right: 16px;
+    font-size: 24px;
+    width: 30px;
+    text-align: center;
+}
+.row .label {
+    color: #8899aa;
+    min-width: 100px;
+    font-size: 16px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+.row .value {
+    color: #fff;
+    font-weight: 600;
+    flex: 1;
+    font-size: 22px;
+}
+.via-hint {
+    font-size: 16px;
+    color: #ffaa00;
+    margin-left: 10px;
+    background: rgba(255,170,0,0.1);
+    padding: 4px 12px;
+    border-radius: 6px;
+}
+.motd-section {
+    margin-top: 30px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+}
+.motd-label {
+    font-size: 18px;
+    color: #8899aa;
+    margin-bottom: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+.motd-box {
+    background: rgba(0,0,0,0.3);
+    border-radius: 12px;
+    padding: 24px;
+    font-size: 20px;
+    line-height: 1.8;
+    color: #e0e0e0;
+    word-break: break-all;
+    flex: 1;
+    border: 1px solid rgba(255,255,255,0.05);
+}
+.footer {
+    margin-top: auto;
+    text-align: right;
+    font-size: 14px;
+    color: rgba(255,255,255,0.3);
+    padding-top: 30px;
+    border-top: 1px solid rgba(255,255,255,0.05);
+}
 .title-error { color: #ff5555; }
 .error-msg {
     background: rgba(255,85,85,0.1); border-radius: 10px;
     padding: 18px 22px; font-size: 16px; color: #ff8888;
+}
+.highlight {
+    background: linear-gradient(135deg, rgba(85,255,85,0.1) 0%, rgba(85,255,255,0.1) 100%);
+    padding: 8px 16px;
+    border-radius: 8px;
+    border-left: 3px solid #55ff55;
 }
 </style>
 
@@ -417,7 +502,9 @@ body {
     <span class="title title-error">❌ 查询失败</span>
     <span class="badge badge-bedrock">{{ edition_label }}</span>
   </div>
-  <div class="row"><span class="icon">📍</span><span class="label">服务器</span><span class="value">{{ server_address }}</span></div>
+  <div class="info-section">
+    <div class="row highlight"><span class="icon">📍</span><span class="label">服务器</span><span class="value">{{ server_address }}</span></div>
+  </div>
   <div class="error-msg">{{ error_msg }}</div>
 
   {% else %}
@@ -426,20 +513,22 @@ body {
     <span class="badge {% if not is_java %}badge-bedrock{% endif %}">{{ edition_label }}</span>
   </div>
 
-  <div class="row"><span class="icon">📍</span><span class="label">地址</span><span class="value">{{ server_address }}</span></div>
+  <div class="info-section">
+    <div class="row highlight"><span class="icon">📍</span><span class="label">地址</span><span class="value">{{ server_address }}</span></div>
 
-  <div class="row">
-    <span class="icon">📋</span><span class="label">版本</span>
-    <span class="value">{{ version_display }} <span style="color:#8899aa;font-size:15px">(协议 {{ protocol_display|default('--') }})</span></span>
-  </div>
+    <div class="row">
+      <span class="icon">📋</span><span class="label">版本</span>
+      <span class="value">{{ version_display }} <span style="color:#8899aa;font-size:16px">(协议 {{ protocol_display|default('--') }})</span></span>
+    </div>
 
-  {% if via_hint %}
-  <div class="row"><span class="icon">🔄</span><span class="label">兼容</span><span class="value"><span class="via-hint">{{ via_hint }}</span></span></div>
-  {% endif %}
+    {% if via_hint %}
+    <div class="row"><span class="icon">🔄</span><span class="label">兼容</span><span class="value"><span class="via-hint">{{ via_hint }}</span></span></div>
+    {% endif %}
 
-  <div class="row">
-    <span class="icon">👥</span><span class="label">玩家</span>
-    <span class="value">{{ online }} / {{ max_players }}</span>
+    <div class="row highlight">
+      <span class="icon">👥</span><span class="label">玩家</span>
+      <span class="value">{{ online }} / {{ max_players }}</span>
+    </div>
   </div>
 
   <div class="divider"></div>
@@ -456,7 +545,7 @@ body {
 '''
 
 
-@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.4.0")
+@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.4.1")
 class MOTDPlugin(Star):
     """MOTD 查询插件主类"""
     
@@ -464,7 +553,7 @@ class MOTDPlugin(Star):
         super().__init__(context)
         self.config = config
         self._load_config()
-        logger.info(f"[MOTD] 插件初始化完成，版本 1.4.0")
+        logger.info(f"[MOTD] 插件初始化完成，版本 1.4.1")
     
     def _load_config(self):
         """加载插件配置"""
@@ -969,7 +1058,7 @@ class MOTDPlugin(Star):
     async def on_astrbot_loaded(self):
         """Bot 初始化完成时"""
         logger.info("=" * 50)
-        logger.info("[MOTD] 插件已加载 v1.4.0")
+        logger.info("[MOTD] 插件已加载 v1.4.1")
         logger.info("[MOTD] 支持 ViaVersion/Velocity/BungeeCord 多版本兼容")
         logger.info(f"[MOTD] 默认服务器: {self.default_server}:{self.default_port if self.default_server else '未设置'}")
         logger.info(f"[MOTD] 对所有会话生效: {self.enable_all_sessions}")
