@@ -482,14 +482,15 @@ body {
 .stat-main {
     display: flex;
     align-items: flex-end;
-    justify-content: space-between;
-    gap: 32px;
+    justify-content: center;
+    gap: 80px;
 }
 .players-section {
-    flex: 1;
+    flex: 0 0 auto;
 }
 .version-section {
     text-align: right;
+    flex: 0 0 auto;
 }
 .version-label {
     font-size: 22px;
@@ -620,7 +621,7 @@ body {
 '''
 
 
-@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.5.0")
+@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.5.1")
 class MOTDPlugin(Star):
     """MOTD 查询插件主类"""
     
@@ -628,7 +629,7 @@ class MOTDPlugin(Star):
         super().__init__(context)
         self.config = config
         self._load_config()
-        logger.info(f"[MOTD] 插件初始化完成，版本 1.5.0")
+        logger.info(f"[MOTD] 插件初始化完成，版本 1.5.1")
     
     def _load_config(self):
         """加载插件配置"""
@@ -1169,7 +1170,7 @@ class MOTDPlugin(Star):
     async def on_astrbot_loaded(self):
         """Bot 初始化完成时"""
         logger.info("=" * 50)
-        logger.info("[MOTD] 插件已加载 v1.5.0")
+        logger.info("[MOTD] 插件已加载 v1.5.1")
         logger.info("[MOTD] 支持 ViaVersion/Velocity/BungeeCord 多版本兼容")
         logger.info(f"[MOTD] 默认服务器: {self.default_server}:{self.default_port if self.default_server else '未设置'}")
         logger.info(f"[MOTD] 对所有会话生效: {self.enable_all_sessions}")
