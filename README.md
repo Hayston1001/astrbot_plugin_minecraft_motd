@@ -2,7 +2,7 @@
 
 一个用于查询 Minecraft 服务器状态的 AstrBot 插件，支持 Java 版和基岩版服务器，**兼容 ViaVersion 多版本服务器**，**支持 Velocity 代理子服查询**。
 
-![插件预览](assets/preview.jpeg)
+![插件输出图片效果预览图](./assets/preview.jpeg)
 
 ## 功能特性
 

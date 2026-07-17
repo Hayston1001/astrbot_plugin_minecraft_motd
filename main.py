@@ -37,14 +37,14 @@ PROTOCOL_VERSION_MAP: Dict[int, Tuple[str, str]] = {
     109:  ("1.9.2", "1.9"),
     110:  ("1.9.3-1.9.4", "1.9"),
     210:  ("1.10.x", "1.10"),
-    315:  ("1.11.x", "1.11"),
-    316:  ("1.11.1", "1.11"),
+    315:  ("1.11", "1.11"),
+    316:  ("1.11.1-1.11.2", "1.11"),
     335:  ("1.12", "1.12"),
     338:  ("1.12.1", "1.12"),
     340:  ("1.12.2", "1.12"),
     393:  ("1.13", "1.13"),
-    394:  ("1.13.1", "1.13"),
-    401:  ("1.13.2", "1.13"),
+    401:  ("1.13.1", "1.13"),
+    404:  ("1.13.2", "1.13"),
     477:  ("1.14", "1.14"),
     480:  ("1.14.1", "1.14"),
     485:  ("1.14.2", "1.14"),
@@ -75,10 +75,11 @@ PROTOCOL_VERSION_MAP: Dict[int, Tuple[str, str]] = {
     769:  ("1.21.4", "1.21"),
     770:  ("1.21.5", "1.21"),
     771:  ("1.21.6", "1.21"),
-    # 注: 1.21.7 复用了 1.21-1.21.1 的协议号 767，已在上方 767 条目中覆盖
-    772:  ("1.21.8", "1.21"),
+    772:  ("1.21.7-1.21.8", "1.21"),
     773:  ("1.21.9-1.21.10", "1.21"),
     774:  ("1.21.11", "1.21"),
+    775:  ("26.1-26.1.2", "26.1"),
+    776:  ("26.2", "26.2"),
 }
 
 # 已知代理/跨版本软件关键词 → 显示名
@@ -141,8 +142,8 @@ def _build_version_to_protocol():
             ]:
                 _VERSION_TO_PROTOCOL[ver] = proto
 
-    # 特殊映射：某些版本复用了其他版本的协议号
-    _VERSION_TO_PROTOCOL["1.21.7"] = 767  # 1.21.7 复用了 1.21-1.21.1 的协议号
+    # 特殊映射：范围内未被自动覆盖的中间版本
+    _VERSION_TO_PROTOCOL["26.1.1"] = 775  # 26.1.1 在 26.1.0 和 26.1.2 之间，共享协议 775
 
 
 _build_version_to_protocol()
@@ -735,18 +736,21 @@ PROXY_HTML_TEMPLATE = '''
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap');
 html, body {
     margin: 0; padding: 0;
+    height: 100%;
 }
 body {
     font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
     color: #e0e0e0;
     width: 100%;
+    height: 100%;
     margin: 0;
     padding: 0;
 }
 .card {
-    padding: 32px;
+    padding: 24px;
     background: #2D2D2D;
     width: 100%;
+    height: 100%;
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
@@ -756,13 +760,13 @@ body {
 .header {
     display: flex;
     align-items: baseline;
-    gap: 16px;
-    margin-bottom: 24px;
-    padding-bottom: 16px;
+    gap: 12px;
+    margin-bottom: 16px;
+    padding-bottom: 12px;
     border-bottom: 2px solid #444;
 }
 .server-name {
-    font-size: 48px;
+    font-size: 36px;
     font-weight: 700;
     color: #fff;
     flex: 1;
@@ -772,9 +776,9 @@ body {
 }
 .badge {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 20px;
+    font-size: 16px;
     font-weight: 600;
-    padding: 4px 10px;
+    padding: 3px 8px;
     background: #3C3C3C;
     color: #aaa;
     border: 1px solid #555;
@@ -786,9 +790,9 @@ body {
 /* 代理服务器信息 */
 .proxy-info {
     background: #333;
-    padding: 20px 24px;
+    padding: 14px 18px;
     border: 2px solid #444;
-    margin-bottom: 24px;
+    margin-bottom: 16px;
     position: relative;
 }
 .proxy-info::before {
@@ -803,144 +807,183 @@ body {
 .proxy-stats {
     display: flex;
     align-items: center;
-    gap: 40px;
+    gap: 30px;
 }
 .proxy-players {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 48px;
+    font-size: 36px;
     font-weight: 700;
     color: #55ff55;
 }
 .proxy-players .fraction {
-    font-size: 28px;
+    font-size: 20px;
     color: #666;
 }
 .proxy-version {
     text-align: right;
 }
 .proxy-version-label {
-    font-size: 14px;
+    font-size: 12px;
     color: #666;
     text-transform: uppercase;
     letter-spacing: 1px;
 }
 .proxy-version-text {
-    font-size: 20px;
+    font-size: 16px;
     color: #fff;
     font-weight: 600;
 }
 .proxy-via-tag {
     display: inline-block;
-    font-size: 14px;
+    font-size: 12px;
     color: #ffaa00;
     background: rgba(255,170,0,0.15);
-    padding: 2px 6px;
-    margin-top: 4px;
+    padding: 2px 5px;
+    margin-top: 3px;
     border: 1px solid rgba(255,170,0,0.3);
 }
 .proxy-motd {
-    margin-top: 12px;
-    font-size: 16px;
-    line-height: 1.5;
+    margin-top: 8px;
+    font-size: 14px;
+    line-height: 1.4;
     color: #ccc;
 }
 /* 子服列表 */
 .sub-servers-section {
     flex: 1;
+    min-height: 0;
 }
 .section-title {
-    font-size: 20px;
+    font-size: 16px;
     color: #aaa;
     text-transform: uppercase;
     letter-spacing: 2px;
-    margin-bottom: 16px;
-    padding-bottom: 8px;
+    margin-bottom: 10px;
+    padding-bottom: 6px;
     border-bottom: 1px solid #444;
+}
+.sub-servers-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+}
+.sub-servers-grid.compact {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
 }
 .sub-server-item {
     background: #1a1a1a;
     border: 2px solid #333;
-    padding: 16px 20px;
-    margin-bottom: 12px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.sub-server-item.compact {
+    padding: 6px 8px;
+    gap: 2px;
+}
+.sub-server-item.compact .sub-server-name {
+    font-size: 14px;
+}
+.sub-server-item.compact .sub-server-players {
+    font-size: 15px;
+}
+.sub-server-item.compact .sub-server-players .fraction {
+    font-size: 10px;
+}
+.sub-server-item.compact .sub-server-version {
+    font-size: 11px;
+}
+.sub-server-item.compact .sub-server-motd {
+    font-size: 10px;
+}
+.sub-server-item.compact .status-dot {
+    width: 5px;
+    height: 5px;
+}
+.sub-servers-more {
+    margin-top: 6px;
+    font-size: 12px;
+    color: #888;
+    text-align: center;
+}
+.sub-server-header {
     display: flex;
     align-items: center;
-    gap: 20px;
-}
-.sub-server-item:last-child {
-    margin-bottom: 0;
+    gap: 8px;
 }
 .sub-server-name {
-    font-size: 24px;
+    font-size: 16px;
     font-weight: 700;
     color: #fff;
-    min-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .sub-server-status {
-    flex: 0 0 auto;
     display: flex;
     align-items: baseline;
-    gap: 8px;
+    gap: 6px;
 }
 .sub-server-players {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 32px;
+    font-size: 18px;
     font-weight: 700;
     color: #55ff55;
 }
 .sub-server-players .fraction {
-    font-size: 20px;
+    font-size: 12px;
     color: #666;
 }
 .sub-server-version {
-    font-size: 16px;
+    font-size: 12px;
     color: #aaa;
 }
 .sub-server-motd {
-    flex: 1;
-    font-size: 14px;
+    font-size: 11px;
     color: #888;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 .sub-server-error {
-    flex: 1;
-    font-size: 14px;
+    font-size: 11px;
     color: #ff5555;
 }
 .status-dot {
-    width: 10px;
-    height: 10px;
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
     flex-shrink: 0;
 }
 .status-dot-online {
     background: #55ff55;
-    box-shadow: 0 0 6px #55ff55;
+    box-shadow: 0 0 3px #55ff55;
 }
 .status-dot-offline {
     background: #ff5555;
-    box-shadow: 0 0 6px #ff5555;
+    box-shadow: 0 0 3px #ff5555;
 }
 /* 错误状态 */
 .error-container {
-    padding: 20px;
+    padding: 16px;
     text-align: center;
 }
 .error-msg {
     background: rgba(255,85,85,0.1);
-    padding: 12px 20px;
-    font-size: 14px;
+    padding: 10px 16px;
+    font-size: 13px;
     color: #ff8888;
     border: 2px solid rgba(255,85,85,0.3);
     display: inline-block;
 }
 /* 底部 */
 .footer {
-    margin-top: 20px;
+    margin-top: 12px;
     display: flex;
     justify-content: space-between;
-    font-size: 16px;
+    font-size: 14px;
     color: #555;
 }
 .footer-line {
@@ -948,27 +991,9 @@ body {
     height: 1px;
     background: #444;
     align-self: center;
-    margin: 0 16px;
+    margin: 0 12px;
 }
-.errors-section {
-    margin-top: 16px;
-    padding: 12px 16px;
-    background: rgba(255,170,0,0.1);
-    border: 1px solid rgba(255,170,0,0.3);
-}
-.errors-title {
-    font-size: 14px;
-    color: #ffaa00;
-    margin-bottom: 8px;
-}
-.error-item {
-    font-size: 13px;
-    color: #ff8888;
-    margin-bottom: 4px;
-}
-.error-item:last-child {
-    margin-bottom: 0;
-}
+
 </style>
 
 <div class="card">
@@ -1000,15 +1025,18 @@ body {
 
   {% if has_sub_servers %}
   <div class="sub-servers-section">
-    <div class="section-title">子服列表</div>
+    <div class="section-title">子服列表 ({{ sub_servers|length }})</div>
+    <div class="sub-servers-grid {% if sub_servers|length > 6 %}compact{% endif %}">
     {% for sub in sub_servers %}
-    <div class="sub-server-item">
-      <span class="sub-server-name">{{ sub.name }}</span>
+    {% if loop.index <= 6 %}
+    <div class="sub-server-item {% if sub_servers|length > 6 %}compact{% endif %}">
+      <div class="sub-server-header">
+        <span class="status-dot {% if sub.is_error %}status-dot-offline{% else %}status-dot-online{% endif %}"></span>
+        <span class="sub-server-name">{{ sub.name }}</span>
+      </div>
       {% if sub.is_error %}
-      <span class="status-dot status-dot-offline"></span>
       <span class="sub-server-error">{{ sub.error_msg }}</span>
       {% else %}
-      <span class="status-dot status-dot-online"></span>
       <div class="sub-server-status">
         <span class="sub-server-players">{{ sub.online }}<span class="fraction">/{{ sub.max_players }}</span></span>
         <span class="sub-server-version">{{ sub.server_version }}</span>
@@ -1016,16 +1044,12 @@ body {
       <span class="sub-server-motd">{{ sub.motd_html }}</span>
       {% endif %}
     </div>
+    {% endif %}
     {% endfor %}
-  </div>
-  {% endif %}
-
-  {% if errors %}
-  <div class="errors-section">
-    <div class="errors-title">⚠️ 查询警告</div>
-    {% for error in errors %}
-    <div class="error-item">{{ error }}</div>
-    {% endfor %}
+    </div>
+    {% if sub_servers|length > 6 %}
+    <div class="sub-servers-more">还有 {{ sub_servers|length - 6 }} 个子服未显示...</div>
+    {% endif %}
   </div>
   {% endif %}
 

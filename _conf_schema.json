@@ -2,13 +2,13 @@
     "default_server": {
         "description": "默认查询的 Minecraft 服务器地址",
         "type": "string",
-        "hint": "设置后，使用 motd 指令时不带参数将查询此服务器",
+        "hint": "设置后, 使用 motd 指令时不带参数将查询此服务器",
         "default": ""
     },
     "default_port": {
         "description": "默认服务器端口",
         "type": "int",
-        "hint": "Minecraft Java 版默认端口为 25565，基岩版为 19132",
+        "hint": "Minecraft Java 版默认端口为 25565, 基岩版为 19132",
         "default": 25565
     },
     "query_type": {
@@ -16,58 +16,58 @@
         "type": "string",
         "options": ["normal", "proxy"],
         "default": "normal",
-        "hint": "普通查询：直接查询单个服务器；代理服务器查询：查询Velocity代理及其子服"
+        "hint": "normal: 直接查询单个服务器; proxy: 查询Velocity代理及其子服"
     },
     "proxy_query_method": {
         "description": "代理查询方式",
         "type": "string",
         "options": ["velostat", "direct"],
         "default": "velostat",
-        "hint": "velostat：通过velostat插件HTTP API查询（仅支持Velocity，BungeeCord无此插件）；直连：手动配置子服地址分别查询",
+        "hint": "velostat: 通过velostat插件HTTP API查询(仅支持Velocity, BungeeCord无此插件); direct: 手动配置子服地址分别查询",
         "condition": {"query_type": "proxy"}
     },
     "velostat_api_url": {
         "description": "velostat API 地址",
         "type": "string",
         "default": "",
-        "hint": "velostat插件的HTTP API地址，格式：http://代理IP:8080",
+        "hint": "velostat插件的HTTP API地址, 格式: http://IP:8080",
         "condition": {"query_type": "proxy", "proxy_query_method": "velostat"}
     },
     "sub_servers": {
         "description": "子服地址列表",
         "type": "string",
         "default": "",
-        "hint": "子服地址，格式：服务器名:host:port,服务器名:host:port（逗号分隔多个子服）",
+        "hint": "子服地址, 格式: 服务器名:host:port,服务器名:host:port(逗号分隔多个子服)",
         "condition": {"query_type": "proxy", "proxy_query_method": "direct"}
     },
     "enable_all_sessions": {
         "description": "对所有会话生效",
         "type": "bool",
-        "hint": "开启后，所有群聊和私聊都可以使用此插件",
+        "hint": "开启后, 所有群聊和私聊都可以使用此插件",
         "default": true
     },
     "enabled_sessions": {
         "description": "允许使用插件的会话列表",
         "type": "list",
-        "hint": "当【对所有会话生效】关闭时，只有这些会话可以使用插件。会话ID格式: 平台名:消息类型:ID",
+        "hint": "当[对所有会话生效]关闭时, 只有这些会话可以使用插件。会话ID格式: 平台名:消息类型:ID",
         "default": []
     },
     "admin_only_config": {
         "description": "仅管理员可修改配置",
         "type": "bool",
-        "hint": "开启后，只有 AstrBot 平台配置中的管理员才能使用 motd-config 指令",
+        "hint": "开启后, 只有 AstrBot 平台配置中的管理员才能使用 motd-config 指令",
         "default": true
     },
     "query_timeout": {
-        "description": "查询超时时间（秒）",
+        "description": "查询超时时间(秒)",
         "type": "int",
-        "hint": "查询服务器时的超时时间，建议 5-10 秒",
+        "hint": "查询服务器时的超时时间, 建议 5-10 秒",
         "default": 5
     },
     "use_api": {
         "description": "使用 API 查询服务器",
         "type": "bool",
-        "hint": "开启后使用 mcstatus.io API 查询，更稳定可靠。关闭则使用直接连接查询。",
+        "hint": "开启后使用 mcstatus.io API 查询, 更稳定可靠。关闭则使用直接连接查询。",
         "default": true
     }
 }
