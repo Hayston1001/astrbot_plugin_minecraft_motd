@@ -747,7 +747,7 @@ body {
     padding: 0;
 }
 .card {
-    padding: 24px;
+    padding: 32px;
     background: #2D2D2D;
     width: 100%;
     height: 100%;
@@ -760,13 +760,13 @@ body {
 .header {
     display: flex;
     align-items: baseline;
-    gap: 12px;
-    margin-bottom: 16px;
-    padding-bottom: 12px;
+    gap: 16px;
+    margin-bottom: 24px;
+    padding-bottom: 16px;
     border-bottom: 2px solid #444;
 }
 .server-name {
-    font-size: 36px;
+    font-size: 48px;
     font-weight: 700;
     color: #fff;
     flex: 1;
@@ -776,9 +776,9 @@ body {
 }
 .badge {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 16px;
+    font-size: 22px;
     font-weight: 600;
-    padding: 3px 8px;
+    padding: 5px 12px;
     background: #3C3C3C;
     color: #aaa;
     border: 1px solid #555;
@@ -790,9 +790,9 @@ body {
 /* 代理服务器信息 */
 .proxy-info {
     background: #333;
-    padding: 14px 18px;
+    padding: 28px 32px;
     border: 2px solid #444;
-    margin-bottom: 16px;
+    margin-bottom: 20px;
     position: relative;
 }
 .proxy-info::before {
@@ -804,48 +804,61 @@ body {
     height: 3px;
     background: #55ffff;
 }
+.proxy-label {
+    font-size: 24px;
+    color: #777;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin-bottom: 12px;
+}
 .proxy-stats {
     display: flex;
-    align-items: center;
-    gap: 30px;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 60px;
+}
+.proxy-players-section {
+    flex: 0 0 auto;
 }
 .proxy-players {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 36px;
+    font-size: 72px;
     font-weight: 700;
     color: #55ff55;
 }
 .proxy-players .fraction {
-    font-size: 20px;
+    font-size: 36px;
     color: #666;
 }
 .proxy-version {
     text-align: right;
+    flex: 0 0 auto;
 }
 .proxy-version-label {
-    font-size: 12px;
+    font-size: 20px;
     color: #666;
     text-transform: uppercase;
     letter-spacing: 1px;
+    margin-bottom: 6px;
 }
 .proxy-version-text {
-    font-size: 16px;
+    font-size: 36px;
     color: #fff;
     font-weight: 600;
 }
 .proxy-via-tag {
     display: inline-block;
-    font-size: 12px;
+    font-size: 16px;
     color: #ffaa00;
     background: rgba(255,170,0,0.15);
-    padding: 2px 5px;
-    margin-top: 3px;
+    padding: 3px 8px;
+    margin-top: 6px;
     border: 1px solid rgba(255,170,0,0.3);
 }
 .proxy-motd {
-    margin-top: 8px;
-    font-size: 14px;
-    line-height: 1.4;
+    margin-top: 12px;
+    font-size: 16px;
+    line-height: 1.5;
     color: #ccc;
 }
 /* 子服列表 */
@@ -854,67 +867,67 @@ body {
     min-height: 0;
 }
 .section-title {
-    font-size: 16px;
+    font-size: 20px;
     color: #aaa;
     text-transform: uppercase;
     letter-spacing: 2px;
-    margin-bottom: 10px;
-    padding-bottom: 6px;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
     border-bottom: 1px solid #444;
 }
 .sub-servers-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    gap: 8px;
+    gap: 10px;
 }
 .sub-servers-grid.compact {
     grid-template-columns: repeat(3, 1fr);
-    gap: 6px;
+    gap: 8px;
 }
 .sub-server-item {
     background: #1a1a1a;
     border: 2px solid #333;
-    padding: 10px 12px;
+    padding: 14px 16px;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
 }
 .sub-server-item.compact {
-    padding: 6px 8px;
-    gap: 2px;
+    padding: 10px 12px;
+    gap: 3px;
 }
 .sub-server-item.compact .sub-server-name {
-    font-size: 14px;
+    font-size: 16px;
 }
 .sub-server-item.compact .sub-server-players {
-    font-size: 15px;
+    font-size: 18px;
 }
 .sub-server-item.compact .sub-server-players .fraction {
-    font-size: 10px;
+    font-size: 12px;
 }
 .sub-server-item.compact .sub-server-version {
-    font-size: 11px;
+    font-size: 13px;
 }
 .sub-server-item.compact .sub-server-motd {
-    font-size: 10px;
+    font-size: 12px;
 }
 .sub-server-item.compact .status-dot {
-    width: 5px;
-    height: 5px;
+    width: 6px;
+    height: 6px;
 }
 .sub-servers-more {
-    margin-top: 6px;
-    font-size: 12px;
+    margin-top: 8px;
+    font-size: 14px;
     color: #888;
     text-align: center;
 }
 .sub-server-header {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
 }
 .sub-server-name {
-    font-size: 16px;
+    font-size: 20px;
     font-weight: 700;
     color: #fff;
     overflow: hidden;
@@ -924,24 +937,24 @@ body {
 .sub-server-status {
     display: flex;
     align-items: baseline;
-    gap: 6px;
+    gap: 8px;
 }
 .sub-server-players {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 18px;
+    font-size: 22px;
     font-weight: 700;
     color: #55ff55;
 }
 .sub-server-players .fraction {
-    font-size: 12px;
+    font-size: 14px;
     color: #666;
 }
 .sub-server-version {
-    font-size: 12px;
+    font-size: 14px;
     color: #aaa;
 }
 .sub-server-motd {
-    font-size: 11px;
+    font-size: 13px;
     color: #888;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1011,8 +1024,11 @@ body {
   </div>
   {% else %}
   <div class="proxy-info">
+    <div class="proxy-label">在线玩家</div>
     <div class="proxy-stats">
-      <div class="proxy-players">{{ proxy.online }}<span class="fraction">/{{ proxy.max_players }}</span></div>
+      <div class="proxy-players-section">
+        <div class="proxy-players">{{ proxy.online }}<span class="fraction">/{{ proxy.max_players }}</span></div>
+      </div>
       <div class="proxy-version">
         <div class="proxy-version-label">代理版本</div>
         <div class="proxy-version-text">{{ proxy.server_version }}</div>
