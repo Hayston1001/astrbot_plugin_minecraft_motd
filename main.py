@@ -638,20 +638,7 @@ body {
     color: #ccc;
     word-break: break-all;
 }
-.footer {
-    margin-top: 24px;
-    display: flex;
-    justify-content: space-between;
-    font-size: 24px;
-    color: #555;
-}
-.footer-line {
-    flex: 1;
-    height: 1px;
-    background: #444;
-    align-self: center;
-    margin: 0 16px;
-}
+
 .title-error { color: #ff5555; }
 .error-container {
     flex: 1;
@@ -717,11 +704,6 @@ body {
     <div class="motd-content">{{ motd_html }}</div>
   </div>
 
-  <div class="footer">
-    <span>MOTD 查询</span>
-    <div class="footer-line"></div>
-    <span>Hayston1001</span>
-  </div>
   {% endif %}
 
 </div>
@@ -991,22 +973,6 @@ body {
     border: 2px solid rgba(255,85,85,0.3);
     display: inline-block;
 }
-/* 底部 */
-.footer {
-    margin-top: 12px;
-    display: flex;
-    justify-content: space-between;
-    font-size: 14px;
-    color: #555;
-}
-.footer-line {
-    flex: 1;
-    height: 1px;
-    background: #444;
-    align-self: center;
-    margin: 0 12px;
-}
-
 </style>
 
 <div class="card">
@@ -1069,11 +1035,6 @@ body {
   </div>
   {% endif %}
 
-  <div class="footer">
-    <span>MOTD 查询</span>
-    <div class="footer-line"></div>
-    <span>Hayston1001</span>
-  </div>
 </div>
 '''
 
