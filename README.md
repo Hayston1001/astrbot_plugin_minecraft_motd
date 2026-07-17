@@ -1,6 +1,6 @@
 # AstrBot MOTD 查询插件
 
-一个用于查询 Minecraft 服务器状态的 AstrBot 插件，支持 Java 版和基岩版服务器，**兼容 ViaVersion 多版本服务器**。
+一个用于查询 Minecraft 服务器状态的 AstrBot 插件，支持 Java 版和基岩版服务器，**兼容 ViaVersion 多版本服务器**，**支持 Velocity 代理子服查询**。
 
 ![插件预览](assets/preview.jpeg)
 
@@ -10,6 +10,7 @@
 - ✅ **双版本支持**: 同时支持 Java 版和基岩版服务器查询
 - ✅ **图片输出渲染**: 支持输出精美图片
 - ✅ **ViaVersion 兼容**: 智能识别 ViaVersion 多版本服务器，正确显示版本范围
+- ✅ **代理服务器查询**: 支持查询 Velocity 代理及其子服状态（v1.6.0 新增）
 - ✅ **无需斜杠**: 直接输入 `motd` 即可触发，无需 `/` 前缀
 - ✅ **默认服务器**: 可配置默认查询的服务器，简化指令使用
 - ✅ **标准端口**: 查询其他服务器时不带端口自动使用标准端口 25565
@@ -29,6 +30,45 @@
 | Paper/Spigot + ViaVersion | 解析协议号范围并转换为版本号显示 |
 | ViaVersion 字样检测 | 自动识别并标注 ViaVersion 兼容 |
 
+## 代理服务器查询（v1.6.0 新增）
+
+支持查询 Velocity/BungeeCord 代理服务器及其子服状态。
+
+### 查询模式
+
+| 模式 | 说明 | 适用场景 |
+|------|------|----------|
+| **普通查询** | 直接查询单个服务器 | 非代理服务器 |
+| **代理服务器查询** | 查询代理及其子服 | Velocity/BungeeCord 代理 |
+
+### 代理查询方式
+
+| 方式 | 说明 | 支持的代理 |
+|------|------|-----------|
+| **velostat** | 通过 velostat 插件 HTTP API 查询 | 仅 Velocity |
+| **子服直连** | 手动配置子服地址分别查询 | Velocity/BungeeCord |
+
+### 使用 velostat 模式（推荐）
+
+1. 在 Velocity 代理上安装 [velostat](https://modrinth.com/plugin/velostat) 插件
+2. 配置插件：
+   - 查询类型：代理服务器查询
+   - 代理查询方式：通过 velostat 插件查询
+   - velostat API 地址：`http://代理IP:8080`
+
+### 使用子服直连模式
+
+适用于：
+- BungeeCord 代理（无 velostat 插件支持）
+- 子服端口对外暴露的场景
+
+配置：
+- 查询类型：代理服务器查询
+- 代理查询方式：子服直连查询
+- 子服地址列表：`lobby:127.0.0.1:25566,survival:127.0.0.1:25567`
+
+> ⚠️ **注意**: BungeeCord 目前没有类似 velostat 的 HTTP API 插件，只能使用子服直连模式。
+
 ## 使用方法
 
 ### 方法一: 在官方插件市场中搜索 "Minecraft 服务器 motd 查询"
@@ -45,6 +85,10 @@
 |--------|------|--------|
 | `default_server` | 默认服务器地址 | `n.rainplay.cn` |
 | `default_port` | 默认服务器端口 | `46861` |
+| `query_type` | 查询类型 | `normal` |
+| `proxy_query_method` | 代理查询方式 | `velostat` |
+| `velostat_api_url` | velostat API 地址 | `http://代理IP:8080` |
+| `sub_servers` | 子服地址列表 | `lobby:host:port,survival:host:port` |
 | `enable_all_sessions` | 对所有会话生效 | ✅ 勾选 |
 | `use_api` | 使用 API 查询 | ✅ 勾选（更稳定） |
 | `query_timeout` | 查询超时时间 | `5` |
@@ -55,13 +99,43 @@
 
 也可以直接编辑 `data/config/astrbot_plugin_minecraft_motd_config.json`：
 
+**普通查询模式**：
 ```json
 {
     "default_server": "n.rainplay.cn",
     "default_port": 46861,
+    "query_type": "normal",
     "enable_all_sessions": true,
     "enabled_sessions": [],
     "admin_only_config": true,
+    "query_timeout": 5,
+    "use_api": true
+}
+```
+
+**代理查询模式（velostat）**：
+```json
+{
+    "default_server": "proxy.example.com",
+    "default_port": 25565,
+    "query_type": "proxy",
+    "proxy_query_method": "velostat",
+    "velostat_api_url": "http://proxy.example.com:8080",
+    "enable_all_sessions": true,
+    "query_timeout": 5,
+    "use_api": true
+}
+```
+
+**代理查询模式（子服直连）**：
+```json
+{
+    "default_server": "proxy.example.com",
+    "default_port": 25565,
+    "query_type": "proxy",
+    "proxy_query_method": "direct",
+    "sub_servers": "lobby:127.0.0.1:25566,survival:127.0.0.1:25567",
+    "enable_all_sessions": true,
     "query_timeout": 5,
     "use_api": true
 }
@@ -152,6 +226,20 @@
    - 服务器地址和端口
    - 服务器使用的代理软件（如有）
 
+### 问题：代理服务器查询失败？
+
+**velostat 模式：**
+
+1. 确认 velostat 插件已安装并运行
+2. 确认 velostat API 地址正确（默认端口 8080）
+3. 检查 velostat API 是否可访问：`curl http://代理IP:8080/status`
+
+**子服直连模式：**
+
+1. 确认子服地址格式正确：`服务器名:host:port`
+2. 确认子服端口对外暴露
+3. 检查子服是否在线
+
 ### 问题：查询超时或连接被拒绝？
 
 1. 确认服务器地址和端口是否正确
@@ -169,6 +257,8 @@
 ```
 [MOTD] 插件初始化完成，版本 X.X.X
 [MOTD] 配置加载: default_server='xxx', port=25565
+[MOTD] 查询类型: normal/proxy
+[MOTD] 代理查询方式: velostat/direct
 [MOTD] 使用 API 查询: True
 [MOTD] 插件已加载 vX.X.X
 ```
@@ -182,6 +272,13 @@
 [MOTD] 开始执行查询，超时=5秒
 [MOTD] 查询完成，结果: {...}                      # 原始查询结果
 [MOTD] 查询流程完成
+```
+
+### 代理查询日志
+
+```
+[MOTD] 开始代理查询: method=velostat, server='proxy.example.com'
+[MOTD] 代理查询流程完成
 ```
 
 ### 版本解析日志（关键）

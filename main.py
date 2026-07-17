@@ -374,6 +374,112 @@ async def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, time
         return {"error": f"查询失败: {str(e)}"}
 
 
+def parse_sub_servers_config(config_str: str) -> list:
+    """
+    解析子服配置字符串
+    格式: 服务器名:host:port,服务器名:host:port
+    返回: [{"name": "lobby", "host": "127.0.0.1", "port": 25566}, ...]
+    """
+    if not config_str or not config_str.strip():
+        return []
+
+    servers = []
+    for item in config_str.split(","):
+        item = item.strip()
+        if not item:
+            continue
+
+        parts = item.split(":")
+        if len(parts) == 3:
+            name, host, port_str = parts
+            try:
+                port = int(port_str)
+                servers.append({"name": name.strip(), "host": host.strip(), "port": port})
+            except ValueError:
+                logger.warning(f"[MOTD] 子服配置解析失败，端口不是数字: {item}")
+        elif len(parts) == 2:
+            # 没有服务器名，用 host:port 作为名称
+            host, port_str = parts
+            try:
+                port = int(port_str)
+                servers.append({"name": f"{host}:{port}", "host": host.strip(), "port": port})
+            except ValueError:
+                logger.warning(f"[MOTD] 子服配置解析失败，端口不是数字: {item}")
+        else:
+            logger.warning(f"[MOTD] 子服配置格式错误: {item}")
+
+    return servers
+
+
+async def query_velostat_servers(api_url: str, timeout: int = 10) -> Dict[str, Any]:
+    """
+    通过 velostat HTTP API 查询所有子服状态
+    api_url: http://代理IP:port
+    返回: {"servers": {"lobby": {...}, "survival": {...}}, "error": None}
+    """
+    try:
+        # 确保 URL 末尾有 /status
+        url = api_url.rstrip("/") + "/status"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return {"servers": data, "error": None}
+                else:
+                    return {"servers": {}, "error": f"velostat API 请求失败: HTTP {resp.status}"}
+    except asyncio.TimeoutError:
+        return {"servers": {}, "error": "velostat API 请求超时"}
+    except aiohttp.ClientError as e:
+        return {"servers": {}, "error": f"velostat API 连接失败: {str(e)}"}
+    except Exception as e:
+        return {"servers": {}, "error": f"velostat 查询异常: {str(e)}"}
+
+
+async def query_sub_servers_direct(sub_servers: list, timeout: int = 5, use_api: bool = True) -> Dict[str, Any]:
+    """
+    直连查询多个子服状态
+    sub_servers: [{"name": "lobby", "host": "127.0.0.1", "port": 25566}, ...]
+    返回: {"servers": {"lobby": {...}, ...}, "errors": ["...", ...]}
+    """
+    results = {}
+    errors = []
+
+    async def query_one(server_info: Dict[str, Any]) -> tuple:
+        name = server_info["name"]
+        host = server_info["host"]
+        port = server_info["port"]
+        try:
+            result = await asyncio.wait_for(
+                query_java_server(host, port, timeout, use_api),
+                timeout=timeout + 5
+            )
+            if "error" in result:
+                return name, None, f"{name}: {result['error']}"
+            else:
+                return name, result, None
+        except asyncio.TimeoutError:
+            return name, None, f"{name}: 查询超时"
+        except Exception as e:
+            return name, None, f"{name}: {str(e)}"
+
+    # 并发查询所有子服
+    tasks = [query_one(server) for server in sub_servers]
+    task_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for result in task_results:
+        if isinstance(result, Exception):
+            errors.append(str(result))
+        else:
+            name, data, error = result
+            if data:
+                results[name] = data
+            if error:
+                errors.append(error)
+
+    return {"servers": results, "errors": errors}
+
+
 # ============================================================
 # HTML 模板：MOTD 服务器状态卡片
 # Minecraft 游戏内 UI 风格
@@ -621,7 +727,318 @@ body {
 '''
 
 
-@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.5.1")
+# ============================================================
+# HTML 模板：代理服务器状态卡片（母服 + 子服列表）
+# ============================================================
+PROXY_HTML_TEMPLATE = '''
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap');
+html, body {
+    margin: 0; padding: 0;
+}
+body {
+    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
+    color: #e0e0e0;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+}
+.card {
+    padding: 32px;
+    background: #2D2D2D;
+    width: 100%;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    border: 3px solid #555;
+    box-shadow: inset 0 0 0 1px #444;
+}
+.header {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    margin-bottom: 24px;
+    padding-bottom: 16px;
+    border-bottom: 2px solid #444;
+}
+.server-name {
+    font-size: 48px;
+    font-weight: 700;
+    color: #fff;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.badge {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 20px;
+    font-weight: 600;
+    padding: 4px 10px;
+    background: #3C3C3C;
+    color: #aaa;
+    border: 1px solid #555;
+}
+.badge-proxy {
+    color: #55ffff;
+    border-color: #55ffff;
+}
+/* 代理服务器信息 */
+.proxy-info {
+    background: #333;
+    padding: 20px 24px;
+    border: 2px solid #444;
+    margin-bottom: 24px;
+    position: relative;
+}
+.proxy-info::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: #55ffff;
+}
+.proxy-stats {
+    display: flex;
+    align-items: center;
+    gap: 40px;
+}
+.proxy-players {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 48px;
+    font-weight: 700;
+    color: #55ff55;
+}
+.proxy-players .fraction {
+    font-size: 28px;
+    color: #666;
+}
+.proxy-version {
+    text-align: right;
+}
+.proxy-version-label {
+    font-size: 14px;
+    color: #666;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+.proxy-version-text {
+    font-size: 20px;
+    color: #fff;
+    font-weight: 600;
+}
+.proxy-via-tag {
+    display: inline-block;
+    font-size: 14px;
+    color: #ffaa00;
+    background: rgba(255,170,0,0.15);
+    padding: 2px 6px;
+    margin-top: 4px;
+    border: 1px solid rgba(255,170,0,0.3);
+}
+.proxy-motd {
+    margin-top: 12px;
+    font-size: 16px;
+    line-height: 1.5;
+    color: #ccc;
+}
+/* 子服列表 */
+.sub-servers-section {
+    flex: 1;
+}
+.section-title {
+    font-size: 20px;
+    color: #aaa;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #444;
+}
+.sub-server-item {
+    background: #1a1a1a;
+    border: 2px solid #333;
+    padding: 16px 20px;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+}
+.sub-server-item:last-child {
+    margin-bottom: 0;
+}
+.sub-server-name {
+    font-size: 24px;
+    font-weight: 700;
+    color: #fff;
+    min-width: 120px;
+}
+.sub-server-status {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+}
+.sub-server-players {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 32px;
+    font-weight: 700;
+    color: #55ff55;
+}
+.sub-server-players .fraction {
+    font-size: 20px;
+    color: #666;
+}
+.sub-server-version {
+    font-size: 16px;
+    color: #aaa;
+}
+.sub-server-motd {
+    flex: 1;
+    font-size: 14px;
+    color: #888;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.sub-server-error {
+    flex: 1;
+    font-size: 14px;
+    color: #ff5555;
+}
+.status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.status-dot-online {
+    background: #55ff55;
+    box-shadow: 0 0 6px #55ff55;
+}
+.status-dot-offline {
+    background: #ff5555;
+    box-shadow: 0 0 6px #ff5555;
+}
+/* 错误状态 */
+.error-container {
+    padding: 20px;
+    text-align: center;
+}
+.error-msg {
+    background: rgba(255,85,85,0.1);
+    padding: 12px 20px;
+    font-size: 14px;
+    color: #ff8888;
+    border: 2px solid rgba(255,85,85,0.3);
+    display: inline-block;
+}
+/* 底部 */
+.footer {
+    margin-top: 20px;
+    display: flex;
+    justify-content: space-between;
+    font-size: 16px;
+    color: #555;
+}
+.footer-line {
+    flex: 1;
+    height: 1px;
+    background: #444;
+    align-self: center;
+    margin: 0 16px;
+}
+.errors-section {
+    margin-top: 16px;
+    padding: 12px 16px;
+    background: rgba(255,170,0,0.1);
+    border: 1px solid rgba(255,170,0,0.3);
+}
+.errors-title {
+    font-size: 14px;
+    color: #ffaa00;
+    margin-bottom: 8px;
+}
+.error-item {
+    font-size: 13px;
+    color: #ff8888;
+    margin-bottom: 4px;
+}
+.error-item:last-child {
+    margin-bottom: 0;
+}
+</style>
+
+<div class="card">
+  <div class="header">
+    <span class="server-name">代理服务器</span>
+    <span class="badge badge-proxy">PROXY</span>
+  </div>
+
+  {% if proxy.is_error %}
+  <div class="proxy-info">
+    <div class="error-container">
+      <div class="error-msg">{{ proxy.error_msg }}</div>
+      <div style="font-size: 13px; color: #666; margin-top: 8px;">{{ proxy.address }}</div>
+    </div>
+  </div>
+  {% else %}
+  <div class="proxy-info">
+    <div class="proxy-stats">
+      <div class="proxy-players">{{ proxy.online }}<span class="fraction">/{{ proxy.max_players }}</span></div>
+      <div class="proxy-version">
+        <div class="proxy-version-label">代理版本</div>
+        <div class="proxy-version-text">{{ proxy.server_version }}</div>
+        {% if proxy.via_hint %}<div class="proxy-via-tag">{{ proxy.via_hint }}</div>{% endif %}
+      </div>
+    </div>
+    <div class="proxy-motd">{{ proxy.motd_html }}</div>
+  </div>
+  {% endif %}
+
+  {% if has_sub_servers %}
+  <div class="sub-servers-section">
+    <div class="section-title">子服列表</div>
+    {% for sub in sub_servers %}
+    <div class="sub-server-item">
+      <span class="sub-server-name">{{ sub.name }}</span>
+      {% if sub.is_error %}
+      <span class="status-dot status-dot-offline"></span>
+      <span class="sub-server-error">{{ sub.error_msg }}</span>
+      {% else %}
+      <span class="status-dot status-dot-online"></span>
+      <div class="sub-server-status">
+        <span class="sub-server-players">{{ sub.online }}<span class="fraction">/{{ sub.max_players }}</span></span>
+        <span class="sub-server-version">{{ sub.server_version }}</span>
+      </div>
+      <span class="sub-server-motd">{{ sub.motd_html }}</span>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if errors %}
+  <div class="errors-section">
+    <div class="errors-title">⚠️ 查询警告</div>
+    {% for error in errors %}
+    <div class="error-item">{{ error }}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="footer">
+    <span>MOTD 查询</span>
+    <div class="footer-line"></div>
+    <span>Hayston1001</span>
+  </div>
+</div>
+'''
+
+
+@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.6.0")
 class MOTDPlugin(Star):
     """MOTD 查询插件主类"""
     
@@ -629,7 +1046,7 @@ class MOTDPlugin(Star):
         super().__init__(context)
         self.config = config
         self._load_config()
-        logger.info(f"[MOTD] 插件初始化完成，版本 1.5.1")
+        logger.info(f"[MOTD] 插件初始化完成，版本 1.6.0")
     
     def _load_config(self):
         """加载插件配置"""
@@ -640,8 +1057,15 @@ class MOTDPlugin(Star):
         self.admin_only_config = self.config.get("admin_only_config", True)
         self.query_timeout = self.config.get("query_timeout", 5)
         self.use_api = self.config.get("use_api", True)
-        
+
+        # 代理服务器查询配置
+        self.query_type = self.config.get("query_type", "normal")
+        self.proxy_query_method = self.config.get("proxy_query_method", "velostat")
+        self.velostat_api_url = self.config.get("velostat_api_url", "")
+        self.sub_servers_config = self.config.get("sub_servers", "")
+
         logger.info(f"[MOTD] 配置加载: default_server='{self.default_server}', port={self.default_port}")
+        logger.info(f"[MOTD] 查询类型: {self.query_type}, 代理查询方式: {self.proxy_query_method}")
         logger.info(f"[MOTD] 使用 API 查询: {self.use_api}")
     
     def _is_admin(self, event: AstrMessageEvent) -> bool:
@@ -954,12 +1378,17 @@ class MOTDPlugin(Star):
     async def _do_motd_query(self, event: AstrMessageEvent, server: str = "", is_java: bool = True):
         """执行 MOTD 查询的核心逻辑"""
         logger.info(f"[MOTD] 开始查询: server='{server}', is_java={is_java}")
-        
+
         # 检查会话权限
         if not self._check_session_allowed(event):
             logger.info("[MOTD] 会话不在白名单中")
             return
-        
+
+        # 代理服务器查询模式
+        if self.query_type == "proxy" and is_java:
+            await self._do_proxy_query(event, server)
+            return
+
         # 确定查询的服务器
         if not server or server.strip() == "":
             # 使用默认服务器
@@ -977,12 +1406,12 @@ class MOTDPlugin(Star):
             # 用户指定了服务器，解析地址和端口
             server, port = self._parse_server_address(server.strip(), is_java=is_java)
             logger.info(f"[MOTD] 使用指定服务器: {server}:{port}")
-        
+
         server_address = f"{server}:{port}"
-        
+
         # 发送查询中提示
         await event.send(event.plain_result(f"🔍 正在查询服务器 {server_address} ..."))
-        
+
         # 执行查询
         logger.info(f"[MOTD] 开始执行查询，超时={self.query_timeout}秒")
         try:
@@ -1003,7 +1432,7 @@ class MOTDPlugin(Star):
         except Exception as e:
             logger.error(f"[MOTD] 查询异常: {e}")
             result = {"error": f"查询异常: {str(e)}"}
-        
+
         # 格式化并渲染为图片
         context = self._format_response(result, server_address, is_java=is_java)
         try:
@@ -1018,6 +1447,161 @@ class MOTDPlugin(Star):
                 text = f"🎮 服务器: {server_address}\n版本: {context.get('server_version', '?')}\n玩家: {context.get('online', 0)}/{context.get('max_players', 0)}"
             await event.send(event.plain_result(text))
         logger.info("[MOTD] 查询流程完成")
+
+    async def _do_proxy_query(self, event: AstrMessageEvent, server: str = ""):
+        """执行代理服务器查询"""
+        logger.info(f"[MOTD] 开始代理查询: method={self.proxy_query_method}, server='{server}'")
+
+        # 确定代理地址（用于显示）
+        if not server or server.strip() == "":
+            if not self.default_server:
+                await event.send(event.plain_result(
+                    "❌ 未设置默认服务器\n"
+                    "请使用: motd <服务器地址:端口> 查询代理服务器\n"
+                    "或联系管理员使用 /motdconfig default <地址:端口> 设置"
+                ))
+                return
+            proxy_host = self.default_server
+            proxy_port = self.default_port
+        else:
+            proxy_host, proxy_port = self._parse_server_address(server.strip(), is_java=True)
+
+        proxy_address = f"{proxy_host}:{proxy_port}"
+
+        # 发送查询中提示
+        await event.send(event.plain_result(f"🔍 正在查询代理服务器 {proxy_address} 及其子服..."))
+
+        # 先查询代理服务器本身
+        try:
+            proxy_result = await asyncio.wait_for(
+                query_java_server(proxy_host, proxy_port, self.query_timeout, self.use_api),
+                timeout=self.query_timeout + 5
+            )
+        except (asyncio.TimeoutError, Exception) as e:
+            proxy_result = {"error": f"代理服务器查询失败: {str(e)}"}
+
+        # 查询子服
+        sub_servers_data = {}
+        errors = []
+
+        if self.proxy_query_method == "velostat":
+            if not self.velostat_api_url:
+                errors.append("未配置 velostat API 地址，请在插件配置中设置")
+            else:
+                result = await query_velostat_servers(self.velostat_api_url, self.query_timeout + 5)
+                if result["error"]:
+                    errors.append(result["error"])
+                else:
+                    sub_servers_data = result["servers"]
+        else:  # direct
+            sub_servers = parse_sub_servers_config(self.sub_servers_config)
+            if not sub_servers:
+                errors.append("未配置子服地址，请在插件配置中设置子服列表")
+            else:
+                result = await query_sub_servers_direct(sub_servers, self.query_timeout, self.use_api)
+                sub_servers_data = result["servers"]
+                errors.extend(result["errors"])
+
+        # 构建模板上下文
+        context = self._build_proxy_context(proxy_result, proxy_address, sub_servers_data, errors)
+
+        # 渲染并发送
+        try:
+            url = await self.html_render(PROXY_HTML_TEMPLATE, context, options={"full_page": True})
+            await event.send(event.image_result(url))
+        except Exception as e:
+            logger.error(f"[MOTD] 代理查询图片渲染失败: {e}")
+            # 回退到纯文本
+            text = self._build_proxy_text_response(context, proxy_address)
+            await event.send(event.plain_result(text))
+
+        logger.info("[MOTD] 代理查询流程完成")
+
+    def _build_proxy_context(self, proxy_result: Dict, proxy_address: str,
+                             sub_servers: Dict, errors: list) -> Dict[str, Any]:
+        """构建代理查询模板上下文"""
+        # 处理代理服务器信息
+        if "error" in proxy_result:
+            proxy_info = {
+                "is_error": True,
+                "address": proxy_address,
+                "error_msg": proxy_result["error"]
+            }
+        else:
+            version_info = proxy_result.get("version", {})
+            players_info = proxy_result.get("players", {})
+            description = proxy_result.get("description", "无描述")
+            server_version, client_version, via_hint = self._parse_version(version_info)
+
+            proxy_info = {
+                "is_error": False,
+                "address": proxy_address,
+                "server_version": server_version,
+                "client_version": client_version,
+                "via_hint": via_hint,
+                "online": players_info.get("online", 0),
+                "max_players": players_info.get("max", 0),
+                "motd_html": self._motd_to_html(description)
+            }
+
+        # 处理子服信息
+        sub_servers_list = []
+        for name, data in sub_servers.items():
+            if "error" in data:
+                sub_servers_list.append({
+                    "name": name,
+                    "is_error": True,
+                    "error_msg": data["error"]
+                })
+            else:
+                version_info = data.get("version", {})
+                players_info = data.get("players", {})
+                description = data.get("description", "无描述")
+                server_version, client_version, via_hint = self._parse_version(version_info)
+
+                sub_servers_list.append({
+                    "name": name,
+                    "is_error": False,
+                    "server_version": server_version,
+                    "online": players_info.get("online", 0),
+                    "max_players": players_info.get("max", 0),
+                    "motd_html": self._motd_to_html(description)
+                })
+
+        return {
+            "proxy": proxy_info,
+            "sub_servers": sub_servers_list,
+            "errors": errors,
+            "has_sub_servers": len(sub_servers_list) > 0
+        }
+
+    def _build_proxy_text_response(self, context: Dict, proxy_address: str) -> str:
+        """构建代理查询纯文本响应（回退用）"""
+        lines = [f"🖥️ 代理服务器: {proxy_address}"]
+
+        proxy = context.get("proxy", {})
+        if proxy.get("is_error"):
+            lines.append(f"❌ 代理查询失败: {proxy.get('error_msg', '未知')}")
+        else:
+            lines.append(f"版本: {proxy.get('server_version', '?')}")
+            lines.append(f"玩家: {proxy.get('online', 0)}/{proxy.get('max_players', 0)}")
+
+        sub_servers = context.get("sub_servers", [])
+        if sub_servers:
+            lines.append("\n📡 子服列表:")
+            for sub in sub_servers:
+                if sub.get("is_error"):
+                    lines.append(f"  ❌ {sub['name']}: {sub.get('error_msg', '查询失败')}")
+                else:
+                    lines.append(f"  ✅ {sub['name']}: {sub.get('online', 0)}/{sub.get('max_players', 0)} ({sub.get('server_version', '?')})")
+
+        errors = context.get("errors", [])
+        if errors:
+            lines.append("\n⚠️ 错误:")
+            for error in errors:
+                lines.append(f"  - {error}")
+
+        return "\n".join(lines)
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
@@ -1170,9 +1754,16 @@ class MOTDPlugin(Star):
     async def on_astrbot_loaded(self):
         """Bot 初始化完成时"""
         logger.info("=" * 50)
-        logger.info("[MOTD] 插件已加载 v1.5.1")
+        logger.info("[MOTD] 插件已加载 v1.6.0")
         logger.info("[MOTD] 支持 ViaVersion/Velocity/BungeeCord 多版本兼容")
         logger.info(f"[MOTD] 默认服务器: {self.default_server}:{self.default_port if self.default_server else '未设置'}")
+        logger.info(f"[MOTD] 查询类型: {self.query_type}")
+        if self.query_type == "proxy":
+            logger.info(f"[MOTD] 代理查询方式: {self.proxy_query_method}")
+            if self.proxy_query_method == "velostat":
+                logger.info(f"[MOTD] velostat API: {self.velostat_api_url or '未配置'}")
+            else:
+                logger.info(f"[MOTD] 子服列表: {self.sub_servers_config or '未配置'}")
         logger.info(f"[MOTD] 对所有会话生效: {self.enable_all_sessions}")
         logger.info(f"[MOTD] 使用 API 查询: {self.use_api}")
         logger.info("=" * 50)
