@@ -39,6 +39,7 @@ jobs:
           PACKAGE_NAME="astrbot_plugin_minecraft_motd-v${VERSION}"
           mkdir -p "${PACKAGE_NAME}"
           cp main.py metadata.yaml _conf_schema.json "${PACKAGE_NAME}/"
+          cp -r assets "${PACKAGE_NAME}/"
           zip -r "${PACKAGE_NAME}.zip" "${PACKAGE_NAME}"
 
       - name: Create GitHub Release
