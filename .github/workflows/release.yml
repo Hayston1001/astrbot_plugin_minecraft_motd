@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Extract changelog
+        id: changelog
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          # 提取当前版本的changelog内容（从 ## vX.Y.Z 到下一个 ## 或文件结尾）
+          NOTES=$(sed -n "/^## v${VERSION}/,/^## v/{/^## v${VERSION}/d;/^## v/d;p;}" CHANGELOG.md)
+          if [ -z "$NOTES" ]; then
+            NOTES="No release notes found in CHANGELOG.md"
+          fi
+          # 写入多行输出
+          echo "NOTES<<EOF" >> $GITHUB_OUTPUT
+          echo "$NOTES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create package
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          PACKAGE_NAME="astrbot_plugin_minecraft_motd-v${VERSION}"
+          mkdir -p "${PACKAGE_NAME}"
+          cp main.py metadata.yaml _conf_schema.json "${PACKAGE_NAME}/"
+          zip -r "${PACKAGE_NAME}.zip" "${PACKAGE_NAME}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.version.outputs.VERSION }}
+          body: ${{ steps.changelog.outputs.NOTES }}
+          files: astrbot_plugin_minecraft_motd-v${{ steps.version.outputs.VERSION }}.zip
+          generate_release_notes: false
