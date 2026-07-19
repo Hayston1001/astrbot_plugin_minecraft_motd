@@ -729,7 +729,7 @@ body {
     padding: 0;
 }
 .card {
-    padding: 32px;
+    padding: 28px;
     background: #2D2D2D;
     width: 100%;
     height: 100%;
@@ -743,12 +743,12 @@ body {
     display: flex;
     align-items: baseline;
     gap: 16px;
-    margin-bottom: 24px;
-    padding-bottom: 16px;
+    margin-bottom: 20px;
+    padding-bottom: 14px;
     border-bottom: 2px solid #444;
 }
 .server-name {
-    font-size: 48px;
+    font-size: 56px;
     font-weight: 700;
     color: #fff;
     flex: 1;
@@ -758,7 +758,7 @@ body {
 }
 .badge {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 22px;
+    font-size: 26px;
     font-weight: 600;
     padding: 5px 12px;
     background: #3C3C3C;
@@ -772,9 +772,9 @@ body {
 /* 代理服务器信息 */
 .proxy-info {
     background: #333;
-    padding: 28px 32px;
+    padding: 24px 28px;
     border: 2px solid #444;
-    margin-bottom: 20px;
+    margin-bottom: 16px;
     position: relative;
 }
 .proxy-info::before {
@@ -787,29 +787,29 @@ body {
     background: #55ffff;
 }
 .proxy-label {
-    font-size: 24px;
+    font-size: 28px;
     color: #777;
     text-transform: uppercase;
     letter-spacing: 2px;
-    margin-bottom: 12px;
+    margin-bottom: 8px;
 }
 .proxy-stats {
     display: flex;
     align-items: flex-end;
     justify-content: center;
-    gap: 60px;
+    gap: 50px;
 }
 .proxy-players-section {
     flex: 0 0 auto;
 }
 .proxy-players {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 72px;
+    font-size: 80px;
     font-weight: 700;
     color: #55ff55;
 }
 .proxy-players .fraction {
-    font-size: 36px;
+    font-size: 40px;
     color: #666;
 }
 .proxy-version {
@@ -817,29 +817,29 @@ body {
     flex: 0 0 auto;
 }
 .proxy-version-label {
-    font-size: 20px;
+    font-size: 24px;
     color: #666;
     text-transform: uppercase;
     letter-spacing: 1px;
-    margin-bottom: 6px;
+    margin-bottom: 4px;
 }
 .proxy-version-text {
-    font-size: 36px;
+    font-size: 40px;
     color: #fff;
     font-weight: 600;
 }
 .proxy-via-tag {
     display: inline-block;
-    font-size: 16px;
+    font-size: 18px;
     color: #ffaa00;
     background: rgba(255,170,0,0.15);
     padding: 3px 8px;
-    margin-top: 6px;
+    margin-top: 4px;
     border: 1px solid rgba(255,170,0,0.3);
 }
 .proxy-motd {
-    margin-top: 12px;
-    font-size: 16px;
+    margin-top: 8px;
+    font-size: 18px;
     line-height: 1.5;
     color: #ccc;
 }
@@ -849,57 +849,57 @@ body {
     min-height: 0;
 }
 .section-title {
-    font-size: 20px;
+    font-size: 24px;
     color: #aaa;
     text-transform: uppercase;
     letter-spacing: 2px;
-    margin-bottom: 12px;
-    padding-bottom: 8px;
+    margin-bottom: 10px;
+    padding-bottom: 6px;
     border-bottom: 1px solid #444;
 }
 .sub-servers-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    gap: 10px;
+    gap: 8px;
 }
 .sub-servers-grid.compact {
     grid-template-columns: repeat(3, 1fr);
-    gap: 8px;
+    gap: 6px;
 }
 .sub-server-item {
     background: #1a1a1a;
     border: 2px solid #333;
-    padding: 14px 16px;
+    padding: 16px 18px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 5px;
 }
 .sub-server-item.compact {
-    padding: 10px 12px;
+    padding: 12px 14px;
     gap: 3px;
 }
 .sub-server-item.compact .sub-server-name {
-    font-size: 16px;
+    font-size: 20px;
 }
 .sub-server-item.compact .sub-server-players {
-    font-size: 18px;
+    font-size: 22px;
 }
 .sub-server-item.compact .sub-server-players .fraction {
-    font-size: 12px;
+    font-size: 14px;
 }
 .sub-server-item.compact .sub-server-version {
-    font-size: 13px;
+    font-size: 15px;
 }
 .sub-server-item.compact .sub-server-motd {
-    font-size: 12px;
+    font-size: 14px;
 }
 .sub-server-item.compact .status-dot {
-    width: 6px;
-    height: 6px;
+    width: 8px;
+    height: 8px;
 }
 .sub-servers-more {
-    margin-top: 8px;
-    font-size: 14px;
+    margin-top: 6px;
+    font-size: 16px;
     color: #888;
     text-align: center;
 }
@@ -909,7 +909,7 @@ body {
     gap: 10px;
 }
 .sub-server-name {
-    font-size: 20px;
+    font-size: 24px;
     font-weight: 700;
     color: #fff;
     overflow: hidden;
@@ -923,32 +923,50 @@ body {
 }
 .sub-server-players {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 22px;
+    font-size: 26px;
     font-weight: 700;
     color: #55ff55;
 }
 .sub-server-players .fraction {
-    font-size: 14px;
+    font-size: 16px;
     color: #666;
 }
 .sub-server-version {
-    font-size: 14px;
+    font-size: 16px;
     color: #aaa;
 }
 .sub-server-motd {
-    font-size: 13px;
+    font-size: 15px;
     color: #888;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+.sub-server-offline {
+    font-size: 15px;
+    color: #ffaa00;
+}
+.sub-server-item.offline {
+    border-color: #664400;
+    opacity: 0.7;
+}
+.sub-server-item.offline .sub-server-name {
+    color: #999;
+}
+.sub-server-item.error {
+    border-color: #553333;
+    opacity: 0.7;
+}
+.sub-server-item.error .sub-server-name {
+    color: #999;
+}
 .sub-server-error {
-    font-size: 11px;
+    font-size: 13px;
     color: #ff5555;
 }
 .status-dot {
-    width: 6px;
-    height: 6px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
     flex-shrink: 0;
 }
@@ -959,6 +977,10 @@ body {
 .status-dot-offline {
     background: #ff5555;
     box-shadow: 0 0 3px #ff5555;
+}
+.status-dot-not-started {
+    background: #ffaa00;
+    box-shadow: 0 0 3px #ffaa00;
 }
 /* 错误状态 */
 .error-container {
@@ -1011,13 +1033,15 @@ body {
     <div class="sub-servers-grid {% if sub_servers|length > 6 %}compact{% endif %}">
     {% for sub in sub_servers %}
     {% if loop.index <= 6 %}
-    <div class="sub-server-item {% if sub_servers|length > 6 %}compact{% endif %}">
+    <div class="sub-server-item {% if sub_servers|length > 6 %}compact{% endif %} {% if sub.is_error %}error{% elif sub.is_offline %}offline{% endif %}">
       <div class="sub-server-header">
-        <span class="status-dot {% if sub.is_error %}status-dot-offline{% else %}status-dot-online{% endif %}"></span>
+        <span class="status-dot {% if sub.is_error %}status-dot-offline{% elif sub.is_offline %}status-dot-not-started{% else %}status-dot-online{% endif %}"></span>
         <span class="sub-server-name">{{ sub.name }}</span>
       </div>
       {% if sub.is_error %}
       <span class="sub-server-error">{{ sub.error_msg }}</span>
+      {% elif sub.is_offline %}
+      <span class="sub-server-offline">未启动</span>
       {% else %}
       <div class="sub-server-status">
         <span class="sub-server-players">{{ sub.online }}<span class="fraction">/{{ sub.max_players }}</span></span>
@@ -1039,7 +1063,7 @@ body {
 '''
 
 
-@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.6.0")
+@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.7.0")
 class MOTDPlugin(Star):
     """MOTD 查询插件主类"""
     
@@ -1047,7 +1071,7 @@ class MOTDPlugin(Star):
         super().__init__(context)
         self.config = config
         self._load_config()
-        logger.info(f"[MOTD] 插件初始化完成，版本 1.6.0")
+        logger.info(f"[MOTD] 插件初始化完成，版本 1.7.0")
     
     def _load_config(self):
         """加载插件配置"""
@@ -1552,7 +1576,19 @@ class MOTDPlugin(Star):
                 sub_servers_list.append({
                     "name": name,
                     "is_error": True,
+                    "is_offline": False,
                     "error_msg": data["error"]
+                })
+            elif data.get("online") is False:
+                # velostat 返回 online=false，表示子服未启动/已关服
+                sub_servers_list.append({
+                    "name": name,
+                    "is_error": False,
+                    "is_offline": True,
+                    "online": 0,
+                    "max_players": 0,
+                    "server_version": "未知",
+                    "motd_html": ""
                 })
             else:
                 version_info = data.get("version", {})
@@ -1563,6 +1599,7 @@ class MOTDPlugin(Star):
                 sub_servers_list.append({
                     "name": name,
                     "is_error": False,
+                    "is_offline": False,
                     "server_version": server_version,
                     "online": players_info.get("online", 0),
                     "max_players": players_info.get("max", 0),
@@ -1593,6 +1630,8 @@ class MOTDPlugin(Star):
             for sub in sub_servers:
                 if sub.get("is_error"):
                     lines.append(f"  ❌ {sub['name']}: {sub.get('error_msg', '查询失败')}")
+                elif sub.get("is_offline"):
+                    lines.append(f"  ⚪ {sub['name']}: 未启动")
                 else:
                     lines.append(f"  ✅ {sub['name']}: {sub.get('online', 0)}/{sub.get('max_players', 0)} ({sub.get('server_version', '?')})")
 
@@ -1755,7 +1794,7 @@ class MOTDPlugin(Star):
     async def on_astrbot_loaded(self):
         """Bot 初始化完成时"""
         logger.info("=" * 50)
-        logger.info("[MOTD] 插件已加载 v1.6.0")
+        logger.info("[MOTD] 插件已加载 v1.7.0")
         logger.info("[MOTD] 支持 ViaVersion/Velocity/BungeeCord 多版本兼容")
         logger.info(f"[MOTD] 默认服务器: {self.default_server}:{self.default_port if self.default_server else '未设置'}")
         logger.info(f"[MOTD] 查询类型: {self.query_type}")
