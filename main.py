@@ -883,14 +883,14 @@ body {
     display: flex;
     flex-direction: column;
     gap: 2px;
-    height: 100px;
+    height: 110px;
     overflow: hidden;
     box-sizing: border-box;
 }
 .sub-server-item.compact {
     padding: 8px 10px;
     gap: 1px;
-    height: 80px;
+    height: 90px;
 }
 .sub-server-item.compact .sub-server-name {
     font-size: 20px;
