@@ -879,18 +879,18 @@ body {
 .sub-server-item {
     background: #1a1a1a;
     border: 2px solid #333;
-    padding: 16px 18px;
+    padding: 10px 14px;
     display: flex;
     flex-direction: column;
-    gap: 5px;
-    height: 140px;
+    gap: 2px;
+    height: 100px;
     overflow: hidden;
     box-sizing: border-box;
 }
 .sub-server-item.compact {
-    padding: 12px 14px;
-    gap: 3px;
-    height: 110px;
+    padding: 8px 10px;
+    gap: 1px;
+    height: 80px;
 }
 .sub-server-item.compact .sub-server-name {
     font-size: 20px;
