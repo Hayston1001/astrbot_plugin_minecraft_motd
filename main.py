@@ -954,6 +954,7 @@ body {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    min-width: 0;
 }
 .sub-server-offline {
     font-size: 15px;
@@ -1628,7 +1629,7 @@ class MOTDPlugin(Star):
                     "server_version": server_version,
                     "online": players_info.get("online", 0),
                     "max_players": players_info.get("max", 0),
-                    "motd_html": self._motd_to_html(description, max_length=50)
+                    "motd_html": self._motd_to_html(description, max_length=20)
                 })
 
         return {
