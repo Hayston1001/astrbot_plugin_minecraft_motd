@@ -227,8 +227,8 @@ async def query_java_server_api(host: str, port: int = JAVA_DEFAULT_PORT) -> Dic
 
 
 async def query_java_server_direct(host: str, port: int = JAVA_DEFAULT_PORT, timeout: int = 5) -> Dict[str, Any]:
-    """直接查询 Java 版服务器状态"""
-    
+    """直接查询 Java 版服务器状态（asyncio 异步 TCP，不阻塞事件循环）"""
+
     def _pack_varint(value: int) -> bytes:
         result = b""
         while True:
@@ -240,61 +240,54 @@ async def query_java_server_direct(host: str, port: int = JAVA_DEFAULT_PORT, tim
                 result += struct.pack("B", byte)
                 break
         return result
-    
-    def _unpack_varint(sock: socket.socket) -> int:
+
+    async def _unpack_varint(reader: asyncio.StreamReader) -> int:
         result = 0
         for i in range(5):
-            byte = sock.recv(1)
-            if not byte:
-                raise ConnectionError("连接中断")
-            byte = byte[0]
+            data = await reader.readexactly(1)
+            byte = data[0]
             result |= (byte & 0x7F) << (7 * i)
             if not (byte & 0x80):
                 return result
         raise ValueError("变长整数过大")
-    
+
     def _pack_data(data: bytes) -> bytes:
         return _pack_varint(len(data)) + data
-    
+
+    async def _do_query() -> Dict[str, Any]:
+        reader, writer = await asyncio.open_connection(host, port)
+        try:
+            # 发送握手包
+            handshake_data = (
+                _pack_varint(-1) +  # 协议版本 -1
+                _pack_data(host.encode('utf-8')) +
+                struct.pack('>H', port) +
+                _pack_varint(1)  # 状态请求
+            )
+            packet = _pack_varint(0) + handshake_data
+            writer.write(_pack_data(packet))
+
+            # 发送状态请求
+            writer.write(_pack_data(_pack_varint(0)))
+            await writer.drain()
+
+            # 读取响应长度
+            await _unpack_varint(reader)
+            await _unpack_varint(reader)
+
+            # 读取 JSON 长度
+            json_length = await _unpack_varint(reader)
+
+            # 读取 JSON 数据
+            json_data = await reader.readexactly(json_length)
+
+            return json.loads(json_data.decode('utf-8'))
+        finally:
+            writer.close()
+
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect((host, port))
-        
-        # 发送握手包
-        handshake_data = (
-            _pack_varint(-1) +  # 协议版本 -1
-            _pack_data(host.encode('utf-8')) +
-            struct.pack('>H', port) +
-            _pack_varint(1)  # 状态请求
-        )
-        packet = _pack_varint(0) + handshake_data
-        sock.sendall(_pack_data(packet))
-        
-        # 发送状态请求
-        sock.sendall(_pack_data(_pack_varint(0)))
-        
-        # 读取响应长度
-        length = _unpack_varint(sock)
-        packet_id = _unpack_varint(sock)
-        
-        # 读取 JSON 长度
-        json_length = _unpack_varint(sock)
-        
-        # 读取 JSON 数据
-        json_data = b""
-        while len(json_data) < json_length:
-            chunk = sock.recv(min(4096, json_length - len(json_data)))
-            if not chunk:
-                break
-            json_data += chunk
-        
-        sock.close()
-        
-        response = json.loads(json_data.decode('utf-8'))
-        return response
-        
-    except socket.timeout:
+        return await asyncio.wait_for(_do_query(), timeout=timeout)
+    except asyncio.TimeoutError:
         return {"error": "连接超时，请检查服务器地址和端口是否正确"}
     except socket.gaierror:
         return {"error": "无法解析服务器地址，请检查主机名是否正确"}
@@ -1081,7 +1074,7 @@ body {
 '''
 
 
-@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.7.2")
+@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.7.3")
 class MOTDPlugin(Star):
     """MOTD 查询插件主类"""
     
@@ -1089,7 +1082,7 @@ class MOTDPlugin(Star):
         super().__init__(context)
         self.config = config
         self._load_config()
-        logger.info(f"[MOTD] 插件初始化完成，版本 1.7.2")
+        logger.info(f"[MOTD] 插件初始化完成，版本 1.7.3")
     
     def _load_config(self):
         """加载插件配置"""
@@ -1822,7 +1815,7 @@ class MOTDPlugin(Star):
     async def on_astrbot_loaded(self):
         """Bot 初始化完成时"""
         logger.info("=" * 50)
-        logger.info("[MOTD] 插件已加载 v1.7.2")
+        logger.info("[MOTD] 插件已加载 v1.7.3")
         logger.info("[MOTD] 支持 ViaVersion/Velocity/BungeeCord 多版本兼容")
         logger.info(f"[MOTD] 默认服务器: {self.default_server}:{self.default_port if self.default_server else '未设置'}")
         logger.info(f"[MOTD] 查询类型: {self.query_type}")
