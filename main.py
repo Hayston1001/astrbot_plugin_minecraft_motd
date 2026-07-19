@@ -456,13 +456,13 @@ async def query_sub_servers_direct(sub_servers: list, timeout: int = 5, use_api:
                 timeout=timeout + 5
             )
             if "error" in result:
-                return name, None, f"{name}: {result['error']}"
+                return name, None, result['error']
             else:
                 return name, result, None
         except asyncio.TimeoutError:
-            return name, None, f"{name}: 查询超时"
+            return name, None, "查询超时"
         except Exception as e:
-            return name, None, f"{name}: {str(e)}"
+            return name, None, str(e)
 
     # 并发查询所有子服
     tasks = [query_one(server) for server in sub_servers]
@@ -475,8 +475,11 @@ async def query_sub_servers_direct(sub_servers: list, timeout: int = 5, use_api:
             name, data, error = result
             if data:
                 results[name] = data
+            elif error:
+                # 查询失败的子服也保留，显示连接错误而非静默忽略
+                results[name] = {"error": error}
             if error:
-                errors.append(error)
+                errors.append(f"{name}: {error}")
 
     return {"servers": results, "errors": errors}
 
@@ -636,7 +639,10 @@ body {
     font-size: 22px;
     line-height: 1.7;
     color: #ccc;
-    word-break: break-all;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
 }
 
 .title-error { color: #ff5555; }
@@ -842,6 +848,10 @@ body {
     font-size: 18px;
     line-height: 1.5;
     color: #ccc;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
 }
 /* 子服列表 */
 .sub-servers-section {
@@ -1068,7 +1078,7 @@ body {
 '''
 
 
-@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.7.1")
+@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.7.2")
 class MOTDPlugin(Star):
     """MOTD 查询插件主类"""
     
@@ -1076,7 +1086,7 @@ class MOTDPlugin(Star):
         super().__init__(context)
         self.config = config
         self._load_config()
-        logger.info(f"[MOTD] 插件初始化完成，版本 1.7.1")
+        logger.info(f"[MOTD] 插件初始化完成，版本 1.7.2")
     
     def _load_config(self):
         """加载插件配置"""
@@ -1301,8 +1311,18 @@ class MOTDPlugin(Star):
 
         return server_version, client_version, via_hint
 
-    def _motd_to_html(self, motd_data: Any) -> str:
-        """将 MOTD 数据转换为带颜色的 HTML，支持 § 颜色码和 JSON 格式"""
+    def _motd_to_html(self, motd_data: Any, max_length: int = 0) -> str:
+        """将 MOTD 数据转换为带颜色的 HTML，支持 § 颜色码和 JSON 格式
+        max_length > 0 时，超过该字符数的纯文本会被截断（丢弃颜色信息）
+        """
+        # 长度预检：提取纯文本，超长则降级为截断后的纯字符串
+        if max_length > 0:
+            if isinstance(motd_data, (dict, list)):
+                plain = self._format_motd(motd_data)
+            else:
+                plain = str(motd_data)
+            if len(plain) > max_length:
+                motd_data = plain[:max_length] + '…'
         parts = []
         current_color = '#ffffff'
 
@@ -1363,7 +1383,7 @@ class MOTDPlugin(Star):
             logger.info(f"[MOTD] Java 版原始数据: version={version_info}, players={players_info}")
 
             server_version, client_version, via_hint = self._parse_version(version_info)
-            motd_html = self._motd_to_html(description)
+            motd_html = self._motd_to_html(description, max_length=100)
             online = players_info.get("online", 0)
             max_players = players_info.get("max", 0)
             sample = players_info.get("sample", [])
@@ -1385,7 +1405,7 @@ class MOTDPlugin(Star):
                 "motd_html": motd_html,
             }
         else:
-            motd_html = self._motd_to_html(result.get("motd", "无描述"))
+            motd_html = self._motd_to_html(result.get("motd", "无描述"), max_length=100)
             server_version = result.get("version", "未知")
             online = result.get("online_players", 0)
             max_players = result.get("max_players", 0)
@@ -1571,7 +1591,7 @@ class MOTDPlugin(Star):
                 "via_hint": via_hint,
                 "online": players_info.get("online", 0),
                 "max_players": players_info.get("max", 0),
-                "motd_html": self._motd_to_html(description)
+                "motd_html": self._motd_to_html(description, max_length=80)
             }
 
         # 处理子服信息
@@ -1608,7 +1628,7 @@ class MOTDPlugin(Star):
                     "server_version": server_version,
                     "online": players_info.get("online", 0),
                     "max_players": players_info.get("max", 0),
-                    "motd_html": self._motd_to_html(description)
+                    "motd_html": self._motd_to_html(description, max_length=50)
                 })
 
         return {
@@ -1799,7 +1819,7 @@ class MOTDPlugin(Star):
     async def on_astrbot_loaded(self):
         """Bot 初始化完成时"""
         logger.info("=" * 50)
-        logger.info("[MOTD] 插件已加载 v1.7.1")
+        logger.info("[MOTD] 插件已加载 v1.7.2")
         logger.info("[MOTD] 支持 ViaVersion/Velocity/BungeeCord 多版本兼容")
         logger.info(f"[MOTD] 默认服务器: {self.default_server}:{self.default_port if self.default_server else '未设置'}")
         logger.info(f"[MOTD] 查询类型: {self.query_type}")
