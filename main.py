@@ -860,10 +860,12 @@ body {
 .sub-servers-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
+    grid-auto-rows: 1fr;
     gap: 8px;
 }
 .sub-servers-grid.compact {
     grid-template-columns: repeat(3, 1fr);
+    grid-auto-rows: 1fr;
     gap: 6px;
 }
 .sub-server-item {
@@ -920,6 +922,7 @@ body {
     display: flex;
     align-items: baseline;
     gap: 8px;
+    flex-grow: 1;
 }
 .sub-server-players {
     font-family: 'JetBrains Mono', monospace;
@@ -945,6 +948,7 @@ body {
 .sub-server-offline {
     font-size: 15px;
     color: #ffaa00;
+    flex-grow: 1;
 }
 .sub-server-item.offline {
     border-color: #664400;
@@ -963,6 +967,7 @@ body {
 .sub-server-error {
     font-size: 13px;
     color: #ff5555;
+    flex-grow: 1;
 }
 .status-dot {
     width: 8px;
@@ -1063,7 +1068,7 @@ body {
 '''
 
 
-@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.7.0")
+@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.7.1")
 class MOTDPlugin(Star):
     """MOTD 查询插件主类"""
     
@@ -1071,7 +1076,7 @@ class MOTDPlugin(Star):
         super().__init__(context)
         self.config = config
         self._load_config()
-        logger.info(f"[MOTD] 插件初始化完成，版本 1.7.0")
+        logger.info(f"[MOTD] 插件初始化完成，版本 1.7.1")
     
     def _load_config(self):
         """加载插件配置"""
@@ -1593,7 +1598,7 @@ class MOTDPlugin(Star):
             else:
                 version_info = data.get("version", {})
                 players_info = data.get("players", {})
-                description = data.get("description", "无描述")
+                description = data.get("motd") or data.get("description") or "无描述"
                 server_version, client_version, via_hint = self._parse_version(version_info)
 
                 sub_servers_list.append({
@@ -1794,7 +1799,7 @@ class MOTDPlugin(Star):
     async def on_astrbot_loaded(self):
         """Bot 初始化完成时"""
         logger.info("=" * 50)
-        logger.info("[MOTD] 插件已加载 v1.7.0")
+        logger.info("[MOTD] 插件已加载 v1.7.1")
         logger.info("[MOTD] 支持 ViaVersion/Velocity/BungeeCord 多版本兼容")
         logger.info(f"[MOTD] 默认服务器: {self.default_server}:{self.default_port if self.default_server else '未设置'}")
         logger.info(f"[MOTD] 查询类型: {self.query_type}")
