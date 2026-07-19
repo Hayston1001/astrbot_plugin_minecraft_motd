@@ -883,14 +883,14 @@ body {
     display: flex;
     flex-direction: column;
     gap: 5px;
-    height: 110px;
+    height: 140px;
     overflow: hidden;
     box-sizing: border-box;
 }
 .sub-server-item.compact {
     padding: 12px 14px;
     gap: 3px;
-    height: 90px;
+    height: 110px;
 }
 .sub-server-item.compact .sub-server-name {
     font-size: 20px;
@@ -1631,7 +1631,7 @@ class MOTDPlugin(Star):
                     "server_version": server_version,
                     "online": players_info.get("online", 0),
                     "max_players": players_info.get("max", 0),
-                    "motd_html": self._motd_to_html(description, max_length=20)
+                    "motd_html": self._motd_to_html(description, max_length=30)
                 })
 
         return {
