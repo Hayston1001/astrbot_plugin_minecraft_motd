@@ -870,12 +870,10 @@ body {
 .sub-servers-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    grid-auto-rows: 1fr;
     gap: 8px;
 }
 .sub-servers-grid.compact {
     grid-template-columns: repeat(3, 1fr);
-    grid-auto-rows: 1fr;
     gap: 6px;
 }
 .sub-server-item {
@@ -885,10 +883,14 @@ body {
     display: flex;
     flex-direction: column;
     gap: 5px;
+    height: 110px;
+    overflow: hidden;
+    box-sizing: border-box;
 }
 .sub-server-item.compact {
     padding: 12px 14px;
     gap: 3px;
+    height: 90px;
 }
 .sub-server-item.compact .sub-server-name {
     font-size: 20px;
