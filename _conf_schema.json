@@ -69,5 +69,23 @@
         "type": "bool",
         "hint": "开启后使用 mcstatus.io API 查询, 更稳定可靠。关闭则使用直接连接查询。",
         "default": true
+    },
+    "show_server_icon": {
+        "description": "显示服务器图标",
+        "type": "bool",
+        "hint": "开启后卡片上显示服务器图标, 无图标的服务器显示像素占位块",
+        "default": true
+    },
+    "show_player_list": {
+        "description": "显示在线玩家列表",
+        "type": "bool",
+        "hint": "开启后卡片上显示在线玩家的头像和昵称(最多 8 个, 超出显示 +N)。头像来自外部服务, 加载失败不影响卡片",
+        "default": true
+    },
+    "show_latency": {
+        "description": "显示查询延迟",
+        "type": "bool",
+        "hint": "开启后卡片显示本次查询耗时(毫秒), 并在页脚展示数据源信息",
+        "default": true
     }
 }

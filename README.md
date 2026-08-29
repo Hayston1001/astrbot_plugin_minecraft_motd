@@ -1,6 +1,8 @@
-# AstrBot MOTD 查询插件
+<p align="center"><img src="./logo.png" width="96" alt="logo"></p>
 
-一个用于查询 Minecraft 服务器状态的 AstrBot 插件，支持 Java 版和基岩版服务器，**兼容 ViaVersion 多版本服务器**，**支持 Velocity 代理子服查询**。
+# MC 服务器状态查询（AstrBot MOTD 查询插件）
+
+一个用于查询 Minecraft 服务器状态的 AstrBot 插件。v2.0.0 全面改版为 **「方块世界」MC 原生像素风卡片**，支持 Java 版和基岩版服务器，**兼容 ViaVersion 多版本服务器**，**支持 Velocity 代理子服查询**。
 
 ![插件输出图片效果预览图1](./assets/preview_java.png)
 ![插件输出图片效果预览图2](./assets/preview_bedrock.png)
@@ -9,10 +11,16 @@
 ## 功能特性
 
 - ✅ **MOTD 查询**: 查询 Minecraft 服务器的 MOTD、在线玩家、版本等信息
+- ✅ **像素风状态卡片**: 泥土纹理背景 + MC GUI 浮雕面板 + 物品栏格子槽 + XP 条式玩家进度条，看起来像"从游戏里截出来的"（v2.0.0 全新）
+- ✅ **彩色 MOTD 完整还原**: 支持 § 颜色码与粗体/斜体/下划线/删除线格式码、§r 重置、JSON 组件树，API 与直连两条查询路径渲染风格一致（v2.0.0）
+- ✅ **服务器图标**: 直接展示服务器 64×64 图标（像素放大渲染），无图标时显示像素占位块（v2.0.0 新增）
+- ✅ **在线玩家头像列表**: 展示最多 8 名在线玩家的头像与昵称（mc-heads 头像，加载失败自动回退首字母占位块，不影响卡片），超出显示 +N（v2.0.0 新增）
+- ✅ **查询延迟显示**: 卡片展示本次查询耗时（绿/金/红分级）（v2.0.0 新增）
 - ✅ **双版本支持**: 同时支持 Java 版和基岩版服务器查询
-- ✅ **图片输出渲染**: 支持输出精美图片
 - ✅ **ViaVersion 兼容**: 智能识别 ViaVersion 多版本服务器，正确显示版本范围
 - ✅ **代理服务器查询**: 支持查询 Velocity 代理及其子服状态（v1.6.0 新增）
+- ✅ **统一文本表情**: 文本回复使用 Unicode emoji（🔍 查询中 / ✅ 成功 / ❌ 失败 / 🟢 在线 / 🟠 未启动），全平台统一稳定显示（v2.0.0）
+- ✅ **多级发送降级**: 图片渲染失败 → 文本卡片，任何一级失败都只记日志不阻塞使用（v2.0.0 强化）
 - ✅ **无需斜杠**: 直接输入 `motd` 即可触发，无需 `/` 前缀
 - ✅ **默认服务器**: 可配置默认查询的服务器，简化指令使用
 - ✅ **标准端口**: 查询其他服务器时不带端口自动使用标准端口 25565
@@ -20,6 +28,15 @@
 - ✅ **会话控制**: 可设置对哪些群聊/私聊生效
 - ✅ **管理员权限**: 插件配置仅管理员可修改
 - ✅ **完善报错**: 详细的错误提示和帮助信息
+
+## QQ 官方机器人使用前提
+
+在 QQ 官方机器人（bot.q.qq.com）的群里使用无斜杠 `motd` 指令，需要在 **手机 QQ 群设置** 中：
+
+1. 开启「**机器人主动在群聊内发言**」
+2. 消息范围设置为「**获取群内全部消息**」（否则仅 @机器人 可触发）
+
+> 图片卡片经 AstrBot 图床以公网 URL 发送，QQ 官方平台仅支持 png/jpg 格式，本插件固定输出 png，无需额外配置。
 
 ## ViaVersion 兼容性
 
@@ -71,7 +88,7 @@
 
 > ⚠️ **注意**: BungeeCord 目前没有类似 velostat 的 HTTP API 插件，只能使用子服直连模式。
 
-## 使用方法
+## 安装方法
 
 ### 方法一: 在官方插件市场中搜索 "Minecraft 服务器 motd 查询"
 
@@ -93,6 +110,9 @@
 | `sub_servers` | 子服地址列表 | `lobby:host:port,survival:host:port` |
 | `enable_all_sessions` | 对所有会话生效 | ✅ 勾选 |
 | `use_api` | 使用 API 查询 | ✅ 勾选（更稳定） |
+| `show_server_icon` | 显示服务器图标 | ✅ 勾选 |
+| `show_player_list` | 显示在线玩家列表 | ✅ 勾选 |
+| `show_latency` | 显示查询延迟 | ✅ 勾选 |
 | `query_timeout` | 查询超时时间 | `5` |
 
 **配置完成后必须重启 AstrBot！**
@@ -111,7 +131,10 @@
     "enabled_sessions": [],
     "admin_only_config": true,
     "query_timeout": 5,
-    "use_api": true
+    "use_api": true,
+    "show_server_icon": true,
+    "show_player_list": true,
+    "show_latency": true
 }
 ```
 
@@ -125,7 +148,10 @@
     "velostat_api_url": "http://proxy.example.com:8080",
     "enable_all_sessions": true,
     "query_timeout": 5,
-    "use_api": true
+    "use_api": true,
+    "show_server_icon": true,
+    "show_player_list": true,
+    "show_latency": true
 }
 ```
 
@@ -139,7 +165,10 @@
     "sub_servers": "lobby:127.0.0.1:25566,survival:127.0.0.1:25567",
     "enable_all_sessions": true,
     "query_timeout": 5,
-    "use_api": true
+    "use_api": true,
+    "show_server_icon": true,
+    "show_player_list": true,
+    "show_latency": true
 }
 ```
 
@@ -193,6 +222,9 @@
 4. **检查白名单**
    - 如果开启了 ID 白名单，确保你的 QQ 号在白名单中
    - 或者在 WebUI 中关闭白名单限制
+
+5. **QQ 官方机器人**
+   - 确认群设置已开启「机器人主动在群聊内发言」与「获取群内全部消息」（见上文使用前提）
 
 ### 问题：ViaVersion 服务器版本显示异常？
 
@@ -249,6 +281,12 @@
 3. 增加 `query_timeout` 配置值
 4. 检查服务器是否在线
 5. 检查 AstrBot 运行的网络环境
+
+### 问题：收到的卡片没有颜色 / 头像不显示？
+
+- 卡片上的玩家头像来自外部服务（mc-heads.net），加载失败会自动回退为「首字母 + 哈希色」占位块，不影响卡片其余部分
+- 如不希望发起头像请求，可在配置中关闭 `show_player_list`
+- 服务器本身未设置图标时，卡片会显示像素占位块；可在配置中关闭 `show_server_icon` 隐藏图标槽
 
 ## 日志解读指南
 
@@ -313,13 +351,15 @@
 [MOTD] 格式化结果: server_version='1.8.x', client_version='1.7.2 ~ 1.21.4', players=10/100
 ```
 
-### 错误日志
+### 错误与降级日志
 
 ```
 [MOTD] API 查询失败，尝试直接查询: 连接超时
 [MOTD] 查询超时
 [MOTD] 查询异常: ...
-[MOTD] 图片渲染失败，回退到纯文本: ...
+[MOTD] 查询中提示发送失败（已忽略）: ...           # 「查询中」提示发送失败，不影响主查询
+[MOTD] 图片渲染/发送失败，回退到文本: ...          # 第一级降级：发送文本卡片
+[MOTD] 文本回退发送失败（放弃）: ...               # 文本也失败，仅记日志，不阻塞主流程
 ```
 
 ## 许可证

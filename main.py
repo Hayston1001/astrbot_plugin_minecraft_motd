@@ -8,7 +8,9 @@ import struct
 import json
 import time
 import re
+import random
 import asyncio
+from urllib.parse import quote
 import aiohttp
 from typing import Optional, Dict, Any, Tuple
 
@@ -104,6 +106,150 @@ MINECRAFT_COLOR_MAP = {
     'c': '#ff5555', 'd': '#ff55ff', 'e': '#ffff55', 'f': '#ffffff',
 }
 
+# Minecraft JSON 组件 color 字段命名色 → CSS 颜色值
+_MC_NAMED_COLORS = {
+    'black': '#000000', 'dark_blue': '#0000AA', 'dark_green': '#00AA00', 'dark_aqua': '#00AAAA',
+    'dark_red': '#AA0000', 'dark_purple': '#AA00AA', 'gold': '#FFAA00', 'gray': '#AAAAAA',
+    'dark_gray': '#555555', 'blue': '#5555FF', 'green': '#55FF55', 'aqua': '#55FFFF',
+    'red': '#FF5555', 'light_purple': '#FF55FF', 'yellow': '#FFFF55', 'white': '#FFFFFF',
+}
+
+# § 格式码 → 状态键（颜色码在 MINECRAFT_COLOR_MAP 中处理，§k 混淆码忽略）
+_MC_FORMAT_CODES = {'l': 'bold', 'o': 'italic', 'n': 'underline', 'm': 'strike'}
+
+# MOTD § 码切分正则（含大小写变体）
+_MOTD_SECTION_RE = re.compile(r'(§[0-9a-fk-or])', re.IGNORECASE)
+
+# 无头像时玩家占位块配色（MC 调色板，按玩家名哈希取色，保证同名稳定）
+_PLAYER_AVATAR_COLORS = ['#55FF55', '#FFAA00', '#55FFFF', '#FF5555', '#FF55FF', '#FFFF55', '#5555FF', '#00AAAA', '#AA00AA', '#AAAAAA']
+
+# 查询数据源 → 展示名
+_SOURCE_LABELS = {
+    'api': 'mcstatus.io API',
+    'direct': 'TCP 直连',
+    'bedrock_udp': 'UDP 直连',
+}
+
+# ============================================================
+# QQ 官方平台表情映射（type=1 系统表情）
+# 值: (QQ 系统表情 ID 或 None, 各平台通用 Unicode emoji)
+# ID 来源: https://bot.q.qq.com/wiki/develop/api-v2/openapi/emoji/model.html
+# 说明: QQ 无对应系统表情时 qq_id 置 None，全平台统一用 Unicode emoji
+# ============================================================
+EMOJI_MAP = {
+    'searching': '🔍',  # 查询中
+    'success':   '✅',  # 查询成功
+    'fail':      '❌',  # 查询失败
+    'online':    '🟢',  # 在线
+    'offline':   '🟠',  # 离线/未启动
+    'proxy':     '🌐',  # 代理
+}
+
+
+def _player_color(name: str) -> str:
+    """根据玩家名生成稳定的标识色（无头像时的占位块边框/文字色）"""
+    idx = sum(ord(c) for c in (name or '?')) % len(_PLAYER_AVATAR_COLORS)
+    return _PLAYER_AVATAR_COLORS[idx]
+
+
+def _default_motd_state() -> dict:
+    """MOTD 渲染默认样式状态（MC 默认文字为白色、无格式）"""
+    return {"color": "#FFFFFF", "bold": False, "italic": False, "underline": False, "strike": False}
+
+
+def _apply_section_code(state: dict, code: str) -> None:
+    """将一个 § 格式码应用到状态上（MC 语义：颜色码会重置已有格式，§r 全部重置）"""
+    code = code.lower()
+    if code == 'r':
+        state.update(_default_motd_state())
+    elif code in MINECRAFT_COLOR_MAP:
+        state.update(_default_motd_state())
+        state["color"] = MINECRAFT_COLOR_MAP[code]
+    elif code == 'k':
+        pass  # 混淆码（§k）：静态渲染环境无动态效果，忽略
+    elif code in _MC_FORMAT_CODES:
+        state[_MC_FORMAT_CODES[code]] = True
+
+
+def _parse_motd_segments(data, state: dict, out: list) -> None:
+    """递归解析 MOTD 数据（§ 码字符串 / JSON 组件树 / 列表）为样式段列表
+    JSON 组件树语义：子组件继承父组件样式，自身字段可覆盖（显式 false 也覆盖）
+    """
+    if data is None:
+        return
+    if isinstance(data, str):
+        cur = dict(state)
+        for seg in _MOTD_SECTION_RE.split(data):
+            if not seg:
+                continue
+            if len(seg) == 2 and seg.startswith('§'):
+                _apply_section_code(cur, seg[1])
+            else:
+                out.append({"text": seg, **cur})
+    elif isinstance(data, dict):
+        cur = dict(state)
+        color = data.get('color')
+        if isinstance(color, str):
+            color_l = color.lower()
+            resolved = MINECRAFT_COLOR_MAP.get(color_l) or _MC_NAMED_COLORS.get(color_l)
+            if resolved is None and color_l.startswith('#'):
+                # 直接使用 hex 颜色（JSON 组件树允许 #RRGGBB）
+                resolved = color
+            if resolved:
+                cur['color'] = resolved
+            elif color_l == 'reset':
+                cur = _default_motd_state()
+        # JSON 组件格式字段：存在即覆盖（含显式 false）
+        for key, fmt in (('bold', 'bold'), ('italic', 'italic'),
+                         ('underlined', 'underline'), ('strikethrough', 'strike')):
+            if data.get(key) is not None:
+                cur[fmt] = bool(data[key])
+        _parse_motd_segments(data.get('text', ''), cur, out)
+        for item in data.get('extra') or []:
+            _parse_motd_segments(item, cur, out)
+    elif isinstance(data, list):
+        for item in data:
+            _parse_motd_segments(item, state, out)
+    else:
+        out.append({"text": str(data), **state})
+
+
+def _render_motd_segments(segments: list) -> str:
+    """合并相邻同样式段并渲染为 HTML span 序列（默认样式不加 span，减少体积）"""
+    merged = []
+    for seg in segments:
+        text = seg.get('text', '')
+        if not text:
+            continue
+        style = (seg.get('color'), seg.get('bold'), seg.get('italic'), seg.get('underline'), seg.get('strike'))
+        if merged and merged[-1][0] == style:
+            merged[-1] = (style, merged[-1][1] + text)
+        else:
+            merged.append((style, text))
+
+    html = []
+    for (color, bold, italic, underline, strike), text in merged:
+        esc = _html_escape(text)
+        props = []
+        if color and color.upper() != '#FFFFFF':
+            props.append(f'color:{color}')
+        if bold:
+            props.append('font-weight:bold')
+        if italic:
+            props.append('font-style:italic')
+        deco = []
+        if underline:
+            deco.append('underline')
+        if strike:
+            deco.append('line-through')
+        if deco:
+            props.append('text-decoration:' + ' '.join(deco))
+        if props:
+            html.append(f'<span style="{";".join(props)}">{esc}</span>')
+        else:
+            html.append(esc)
+    return ''.join(html)
+
 # 版本号正则（匹配 1.x.y 或 1.x）
 _VERSION_RE = re.compile(r'(\d+\.\d+(?:\.\d+)?)')
 
@@ -177,6 +323,7 @@ def _html_escape(text: str) -> str:
 
 async def query_java_server_api(host: str, port: int = JAVA_DEFAULT_PORT) -> Dict[str, Any]:
     """使用第三方 API 查询 Java 版服务器状态"""
+    _t0 = time.perf_counter()
     try:
         async with aiohttp.ClientSession() as session:
             url = f"https://api.mcstatus.io/v2/status/java/{host}:{port}"
@@ -211,10 +358,26 @@ async def query_java_server_api(host: str, port: int = JAVA_DEFAULT_PORT) -> Dic
                                     else:
                                         logger.info(f"[MOTD] 直连查询也未返回协议号")
 
+                        players_data = data.get("players", {})
+                        # 玩家样例列表（mcstatus.io v2 字段为 list，直连为 sample，统一映射为 sample）
+                        sample = [
+                            {"name": p.get("name_clean") or p.get("name_raw") or p.get("name", ""), "uuid": p.get("uuid", "")}
+                            for p in (players_data.get("list") or []) if isinstance(p, dict)
+                        ]
+                        # MOTD 自渲染：优先取 raw JSON 组件树（保留颜色/格式），回退纯文本
+                        motd_data = data.get("motd", {})
+                        if isinstance(motd_data, dict):
+                            description = motd_data.get("raw") or motd_data.get("clean") or "无描述"
+                        else:
+                            description = motd_data or "无描述"
+
                         return {
                             "version": {"name": version_name_raw, "protocol": protocol_raw if protocol_raw is not None else 0},
-                            "players": {"online": data.get("players", {}).get("online", 0), "max": data.get("players", {}).get("max", 0)},
-                            "description": data.get("motd", {}).get("clean", "无描述")
+                            "players": {"online": players_data.get("online", 0), "max": players_data.get("max", 0), "sample": sample},
+                            "description": description,
+                            "icon": data.get("icon"),
+                            "latency_ms": round((time.perf_counter() - _t0) * 1000),
+                            "source": "api",
                         }
                     else:
                         return {"error": "服务器离线或无法访问"}
@@ -286,7 +449,14 @@ async def query_java_server_direct(host: str, port: int = JAVA_DEFAULT_PORT, tim
             writer.close()
 
     try:
-        return await asyncio.wait_for(_do_query(), timeout=timeout)
+        _t0 = time.perf_counter()
+        data = await asyncio.wait_for(_do_query(), timeout=timeout)
+        if isinstance(data, dict):
+            # 服务器图标：直连 JSON 的 favicon 字段（base64 data URI）
+            data["icon"] = data.get("icon") or data.get("favicon")
+            data["latency_ms"] = round((time.perf_counter() - _t0) * 1000)
+            data["source"] = "direct"
+        return data
     except asyncio.TimeoutError:
         return {"error": "连接超时，请检查服务器地址和端口是否正确"}
     except socket.gaierror:
@@ -333,6 +503,7 @@ async def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, time
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(timeout)
+        _t0 = time.perf_counter()
         
         # 发送 Unconnected Ping
         ping_data = b'\x01' + struct.pack('>Q', int(time.time() * 1000)) + b'\x00\x00\x00\x00\x00\x00\x00\x00'
@@ -341,6 +512,7 @@ async def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, time
         # 接收响应
         data, addr = sock.recvfrom(2048)
         sock.close()
+        _latency_ms = round((time.perf_counter() - _t0) * 1000)
         
         # 解析响应
         if len(data) < 35:
@@ -357,7 +529,9 @@ async def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, time
                 "version": server_info[3],
                 "online_players": server_info[4],
                 "max_players": server_info[5],
-                "server_id": server_info[6] if len(server_info) > 6 else "未知"
+                "server_id": server_info[6] if len(server_info) > 6 else "未知",
+                "latency_ms": _latency_ms,
+                "source": "bedrock_udp",
             }
         else:
             return {"error": "无法解析服务器响应"}
@@ -479,602 +653,893 @@ async def query_sub_servers_direct(sub_servers: list, timeout: int = 5, use_api:
 
 # ============================================================
 # HTML 模板：MOTD 服务器状态卡片
-# Minecraft 游戏内 UI 风格
+# 视觉方向：「方块世界」MC 原生像素风
+#  - CSS 变量设计 token（三张卡共用一套）
+#  - 高度内容自适应（无 height:100%，配合 full_page 截图）
+#  - MC GUI 浮雕边框（上左亮 / 下右暗）
 # ============================================================
-MOTD_HTML_TEMPLATE = '''
+
+
+def _build_dirt_tile_data_uri() -> str:
+    """生成 8x8 像素泥土纹理的 SVG data URI（固定种子伪随机，结果确定）
+    用于卡片背景，模拟 Minecraft 主菜单的泥土方块背景
+    """
+    rng = random.Random(20260829)
+    palette = ['#6B4A2B', '#5F4126', '#7A5432', '#553A21', '#6F4C2E', '#5A3E24', '#825A36', '#4E3620']
+    weights = [4, 6, 2, 3, 3, 5, 1, 2]
+    rects = []
+    for y in range(8):
+        for x in range(8):
+            c = rng.choices(palette, weights)[0]
+            rects.append(f'<rect x="{x}" y="{y}" width="1" height="1" fill="{c}"/>')
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" '
+           'shape-rendering="crispEdges">' + ''.join(rects) + '</svg>')
+    return "data:image/svg+xml," + quote(svg, safe="")
+
+
+_DIRT_TILE = _build_dirt_tile_data_uri()
+
+
+_MOTD_TEMPLATE_SRC = '''
+<meta name="viewport" content="width=1280; height=1">
 <style>
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap');
+@import url('https://cdn.jsdelivr.net/npm/@fontsource/press-start-2p@5/index.min.css');
 html, body {
     margin: 0; padding: 0;
-    height: 100%;
 }
 body {
-    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
-    color: #e0e0e0;
-    width: 100%;
-    height: 100%;
-    margin: 0;
-    padding: 0;
-}
-.card {
-    padding: 32px;
-    background: #2D2D2D;
-    width: 100%;
-    height: 100%;
+    /* ── 设计 token：MC 调色板 ── */
+    --green: #55FF55; --green-xp: #7EFC20; --gold: #FFAA00;
+    --red: #FF5555; --aqua: #55FFFF;
+    --panel: #3F3F3F; --panel-hi: #757575; --panel-lo: #191919;
+    --slot: #2B2B2B; --slot-hi: #141414; --slot-lo: #4E4E4E;
+    --ink: #EDEDED; --muted: #A6A6A6;
+    --pixel: 'Press Start 2P', 'Microsoft YaHei', monospace;
+    --sans: 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif;
+    font-family: var(--sans);
+    color: var(--ink);
+    width: 1280px;
     box-sizing: border-box;
+    padding: 30px;
+    background-color: #5A3E24;
+    background-image: url("__DIRT_TILE__");
+    background-size: 96px 96px;
+    image-rendering: pixelated;
+    /* 弹性拉伸: 视口多高 body 就撑多高(内容自适应卡在矮内容时也能充满图片) */
+    min-height: 100vh;
     display: flex;
     flex-direction: column;
-    border: 3px solid #555;
-    box-shadow: inset 0 0 0 1px #444;
 }
-.header {
+
+/* 卡片容器: 拉伸填满 body, 面板再填满卡片 */
+.card {
     display: flex;
-    align-items: baseline;
-    gap: 16px;
-    margin-bottom: 32px;
-    padding-bottom: 20px;
-    border-bottom: 2px solid #444;
+    flex-direction: column;
+    flex: 1 0 auto;
 }
-.server-name {
-    font-size: 72px;
-    font-weight: 700;
-    color: #fff;
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+
+/* ── MC GUI 浮雕面板：上左亮 / 下右暗 ── */
+.panel {
+    background: var(--panel);
+    border-style: solid;
+    border-width: 4px;
+    border-color: var(--panel-hi) var(--panel-lo) var(--panel-lo) var(--panel-hi);
+    padding: 30px 34px 34px;
+    box-sizing: border-box;
+    flex: 1 0 auto;
 }
-.badge {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 28px;
-    font-weight: 600;
-    padding: 6px 14px;
-    background: #3C3C3C;
-    color: #aaa;
-    border: 1px solid #555;
-}
-.badge-java {
-    color: #55ff55;
-    border-color: #55ff55;
-}
-.badge-bedrock {
-    color: #ffaa00;
-    border-color: #ffaa00;
-}
-.stats-row {
+/* ── 物品栏格子槽：凹陷浮雕（与面板反向） ── */
+.slot {
+    background: var(--slot);
+    border-style: solid;
+    border-width: 4px;
+    border-color: var(--slot-hi) var(--slot-lo) var(--slot-lo) var(--slot-hi);
+    box-sizing: border-box;
     display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.head {
+    display: flex;
+    align-items: center;
     gap: 24px;
     margin-bottom: 24px;
+    min-width: 0;
 }
-.stat-box {
-    flex: 1;
-    background: #333;
-    padding: 28px 32px;
-    border: 2px solid #444;
-    position: relative;
-}
-.stat-box::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 3px;
-    background: #55ff55;
-}
-.stat-label {
-    font-size: 28px;
-    color: #777;
-    text-transform: uppercase;
-    letter-spacing: 2px;
-    margin-bottom: 12px;
-}
-.stat-value {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 128px;
-    font-weight: 700;
-    color: #fff;
-}
-.stat-value.players-num {
-    color: #55ff55;
-}
-.stat-value .fraction {
-    font-size: 64px;
-    color: #666;
-}
-.stat-main {
-    display: flex;
-    align-items: flex-end;
-    justify-content: center;
-    gap: 80px;
-}
-.players-section {
+.icon-slot {
+    width: 112px;
+    height: 112px;
     flex: 0 0 auto;
 }
-.version-section {
-    text-align: right;
-    flex: 0 0 auto;
+.icon-slot img {
+    width: 92px;
+    height: 92px;
+    image-rendering: pixelated;
 }
-.version-label {
-    font-size: 22px;
-    color: #666;
-    text-transform: uppercase;
-    letter-spacing: 1.5px;
-    margin-bottom: 6px;
+.icon-letter {
+    font-family: var(--pixel);
+    font-size: 36px;
+    color: var(--muted);
+    text-shadow: 3px 3px 0 #000;
 }
-.version-text {
-    font-size: 40px;
-    color: #fff;
-    font-weight: 600;
-}
-.version-protocol {
-    font-size: 26px;
-    color: #666;
-    margin-top: 4px;
-}
-.via-tag {
-    display: inline-block;
-    font-size: 24px;
-    color: #ffaa00;
-    background: rgba(255,170,0,0.15);
-    padding: 3px 8px;
-    margin-top: 6px;
-    border: 1px solid rgba(255,170,0,0.3);
-}
-.motd-section {
+.head-main {
     flex: 1;
-    background: #1a1a1a;
-    border: 2px solid #444;
-    padding: 24px;
-    position: relative;
+    min-width: 0;
 }
-.motd-content {
-    font-size: 22px;
-    line-height: 1.7;
-    color: #ccc;
-    overflow: hidden;
-    display: -webkit-box;
-    -webkit-line-clamp: 4;
-    -webkit-box-orient: vertical;
-}
-
-.title-error { color: #ff5555; }
-.error-container {
-    flex: 1;
+.addr-row {
     display: flex;
-    flex-direction: column;
-    justify-content: center;
     align-items: center;
-    gap: 20px;
-}
-.error-icon {
-    font-size: 48px;
-    opacity: 0.8;
-}
-.error-msg {
-    background: rgba(255,85,85,0.1);
-    padding: 16px 24px;
-    font-size: 16px;
-    color: #ff8888;
-    text-align: center;
-    border: 2px solid rgba(255,85,85,0.3);
-    max-width: 400px;
-}
-</style>
-
-<div class="card">
-
-  {% if is_error %}
-  <div class="header">
-    <span class="server-name title-error">连接失败</span>
-    <span class="badge badge-bedrock">{{ edition_label }}</span>
-  </div>
-  <div class="error-container">
-    <div class="error-icon">✖</div>
-    <div class="error-msg">{{ error_msg }}</div>
-    <div style="font-size: 13px; color: #666;">{{ server_address }}</div>
-  </div>
-
-  {% else %}
-  <div class="header">
-    <span class="server-name">{{ server_address }}</span>
-    <span class="badge {% if is_java %}badge-java{% else %}badge-bedrock{% endif %}">{{ edition_label }}</span>
-  </div>
-
-  <div class="stat-box">
-    <div class="stat-label">在线玩家</div>
-    <div class="stat-main">
-      <div class="players-section">
-        <div class="stat-value players-num">{{ online }}<span class="fraction">/{{ max_players }}</span></div>
-      </div>
-      <div class="version-section">
-        <div class="version-label">服务器版本</div>
-        <div class="version-text">{{ server_version }}</div>
-        {% if client_version and client_version != server_version %}
-        <div class="version-label" style="margin-top: 12px;">客户端版本</div>
-        <div class="version-text" style="font-size: 32px;">{{ client_version }}</div>
-        {% endif %}
-        {% if via_hint %}<div class="via-tag">{{ via_hint }}</div>{% endif %}
-      </div>
-    </div>
-  </div>
-
-  <div class="motd-section">
-    <div class="motd-content">{{ motd_html }}</div>
-  </div>
-
-  {% endif %}
-
-</div>
-'''
-
-
-# ============================================================
-# HTML 模板：代理服务器状态卡片（母服 + 子服列表）
-# ============================================================
-PROXY_HTML_TEMPLATE = '''
-<style>
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap');
-html, body {
-    margin: 0; padding: 0;
-    height: 100%;
-}
-body {
-    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
-    color: #e0e0e0;
-    width: 100%;
-    height: 100%;
-    margin: 0;
-    padding: 0;
-}
-.card {
-    padding: 28px;
-    background: #2D2D2D;
-    width: 100%;
-    height: 100%;
-    box-sizing: border-box;
-    display: flex;
-    flex-direction: column;
-    border: 3px solid #555;
-    box-shadow: inset 0 0 0 1px #444;
-}
-.header {
-    display: flex;
-    align-items: baseline;
     gap: 16px;
-    margin-bottom: 20px;
-    padding-bottom: 14px;
-    border-bottom: 2px solid #444;
+    min-width: 0;
 }
-.server-name {
-    font-size: 56px;
+.addr {
+    font-size: 60px;
     font-weight: 700;
     color: #fff;
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-.badge {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 26px;
-    font-weight: 600;
-    padding: 5px 12px;
-    background: #3C3C3C;
-    color: #aaa;
-    border: 1px solid #555;
-}
-.badge-proxy {
-    color: #55ffff;
-    border-color: #55ffff;
-}
-/* 代理服务器信息 */
-.proxy-info {
-    background: #333;
-    padding: 24px 28px;
-    border: 2px solid #444;
-    margin-bottom: 16px;
-    position: relative;
-}
-.proxy-info::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 3px;
-    background: #55ffff;
-}
-.proxy-label {
-    font-size: 28px;
-    color: #777;
-    text-transform: uppercase;
-    letter-spacing: 2px;
-    margin-bottom: 8px;
-}
-.proxy-stats {
-    display: flex;
-    align-items: flex-end;
-    justify-content: center;
-    gap: 50px;
-}
-.proxy-players-section {
-    flex: 0 0 auto;
-}
-.proxy-players {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 80px;
-    font-weight: 700;
-    color: #55ff55;
-}
-.proxy-players .fraction {
-    font-size: 40px;
-    color: #666;
-}
-.proxy-version {
-    text-align: right;
-    flex: 0 0 auto;
-}
-.proxy-version-label {
-    font-size: 24px;
-    color: #666;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    margin-bottom: 4px;
-}
-.proxy-version-text {
-    font-size: 40px;
-    color: #fff;
-    font-weight: 600;
-}
-.proxy-via-tag {
-    display: inline-block;
-    font-size: 18px;
-    color: #ffaa00;
-    background: rgba(255,170,0,0.15);
-    padding: 3px 8px;
-    margin-top: 4px;
-    border: 1px solid rgba(255,170,0,0.3);
-}
-.proxy-motd {
-    margin-top: 8px;
-    font-size: 18px;
-    line-height: 1.5;
-    color: #ccc;
-    overflow: hidden;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-}
-/* 子服列表 */
-.sub-servers-section {
-    flex: 1;
-    min-height: 0;
-}
-.section-title {
-    font-size: 24px;
-    color: #aaa;
-    text-transform: uppercase;
-    letter-spacing: 2px;
-    margin-bottom: 10px;
-    padding-bottom: 6px;
-    border-bottom: 1px solid #444;
-}
-.sub-servers-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 8px;
-}
-.sub-servers-grid.compact {
-    grid-template-columns: repeat(3, 1fr);
-    gap: 6px;
-}
-.sub-server-item {
-    background: #1a1a1a;
-    border: 2px solid #333;
-    padding: 10px 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    height: 110px;
-    overflow: hidden;
-    box-sizing: border-box;
-}
-.sub-server-item.compact {
-    padding: 8px 10px;
-    gap: 1px;
-    height: 90px;
-}
-.sub-server-item.compact .sub-server-name {
-    font-size: 20px;
-}
-.sub-server-item.compact .sub-server-players {
-    font-size: 22px;
-}
-.sub-server-item.compact .sub-server-players .fraction {
-    font-size: 14px;
-}
-.sub-server-item.compact .sub-server-version {
-    font-size: 15px;
-}
-.sub-server-item.compact .sub-server-motd {
-    font-size: 14px;
-}
-.sub-server-item.compact .status-dot {
-    width: 8px;
-    height: 8px;
-}
-.sub-servers-more {
-    margin-top: 6px;
-    font-size: 16px;
-    color: #888;
-    text-align: center;
-}
-.sub-server-header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-.sub-server-name {
-    font-size: 24px;
-    font-weight: 700;
-    color: #fff;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-.sub-server-status {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    flex-grow: 1;
-}
-.sub-server-players {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 26px;
-    font-weight: 700;
-    color: #55ff55;
-}
-.sub-server-players .fraction {
-    font-size: 16px;
-    color: #666;
-}
-.sub-server-version {
-    font-size: 16px;
-    color: #aaa;
-}
-.sub-server-motd {
-    font-size: 15px;
-    color: #888;
+    text-shadow: 3px 3px 0 #000;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
 }
-.sub-server-offline {
-    font-size: 15px;
-    color: #ffaa00;
-    flex-grow: 1;
+.badge {
+    font-family: var(--pixel);
+    font-size: 17px;
+    line-height: 1;
+    padding: 6px 12px 5px;
+    background: #191919;
+    border: 2px solid var(--accent, var(--muted));
+    color: var(--accent, var(--muted));
+    letter-spacing: 2px;
+    flex: 0 0 auto;
 }
-.sub-server-item.offline {
-    border-color: #664400;
-    opacity: 0.7;
+.accent-java { --accent: var(--green); }
+.accent-bedrock { --accent: var(--gold); }
+.accent-proxy { --accent: var(--aqua); }
+.meta-row {
+    margin-top: 10px;
+    font-size: 30px;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
 }
-.sub-server-item.offline .sub-server-name {
-    color: #999;
+.via-tag {
+    font-size: 26px;
+    color: var(--gold);
+    background: rgba(255,170,0,0.12);
+    border: 1px solid rgba(255,170,0,0.4);
+    padding: 3px 10px;
+    flex: 0 0 auto;
 }
-.sub-server-item.error {
-    border-color: #553333;
-    opacity: 0.7;
+.head-right {
+    flex: 0 0 auto;
+    text-align: right;
 }
-.sub-server-item.error .sub-server-name {
-    color: #999;
+.latency-num {
+    font-family: var(--pixel);
+    font-size: 40px;
+    line-height: 1;
+    letter-spacing: 2px;
+    color: var(--green);
+    text-shadow: 2px 2px 0 #000;
 }
-.sub-server-error {
-    font-size: 13px;
-    color: #ff5555;
-    flex-grow: 1;
+.latency-num.lat-mid { color: var(--gold); }
+.latency-num.lat-bad { color: var(--red); }
+.latency-label {
+    font-size: 22px;
+    color: var(--muted);
+    letter-spacing: 2px;
+    margin-top: 6px;
 }
-.status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex-shrink: 0;
+
+/* ── 聊天框样式 MOTD：半透明黑底 ── */
+.motd-chat {
+    background: rgba(0, 0, 0, 0.55);
+    border: 2px solid #151515;
+    box-shadow: inset 0 0 0 1px #000;
+    padding: 20px 26px;
+    font-size: 34px;
+    line-height: 1.6;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+    word-break: break-all;
 }
-.status-dot-online {
-    background: #55ff55;
-    box-shadow: 0 0 3px #55ff55;
+
+/* ── XP 条样式玩家进度条 ── */
+.players-block {
+    margin-top: 24px;
 }
-.status-dot-offline {
-    background: #ff5555;
-    box-shadow: 0 0 3px #ff5555;
+.xp-row {
+    display: flex;
+    align-items: center;
+    gap: 18px;
 }
-.status-dot-not-started {
-    background: #ffaa00;
-    box-shadow: 0 0 3px #ffaa00;
+.xp-nums {
+    font-family: var(--pixel);
+    font-size: 42px;
+    line-height: 1;
+    letter-spacing: 2px;
+    color: var(--green-xp);
+    text-shadow: 2px 2px 0 #000;
+    flex: 0 0 auto;
 }
-/* 错误状态 */
-.error-container {
-    padding: 16px;
+.xp-nums .fraction {
+    font-size: 20px;
+    color: var(--muted);
+}
+.xp-track {
+    flex: 1;
+    height: 26px;
+    background: #131313;
+    border: 2px solid #050505;
+    box-shadow: inset 0 2px 0 rgba(255,255,255,0.08);
+    box-sizing: border-box;
+    min-width: 0;
+}
+.xp-fill {
+    height: 100%;
+    background: repeating-linear-gradient(90deg, #55FF55 0 18px, #43CC43 18px 22px);
+    box-shadow: inset 0 3px 0 rgba(255,255,255,0.45), inset 0 -2px 0 rgba(0,0,0,0.3);
+}
+.xp-pct {
+    font-family: var(--pixel);
+    font-size: 20px;
+    color: var(--green-xp);
+    text-shadow: 2px 2px 0 #000;
+    flex: 0 0 auto;
+    min-width: 70px;
+    text-align: right;
+}
+
+/* ── 在线玩家头像行（MC Tab 列表风格） ── */
+.avatars {
+    margin-top: 20px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.p-chip {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    background: rgba(0,0,0,0.42);
+    border: 2px solid #262626;
+    padding: 5px 13px 5px 5px;
+    min-width: 0;
+}
+.p-head {
+    width: 44px;
+    height: 44px;
+    image-rendering: pixelated;
+    flex: 0 0 auto;
+}
+.p-fallback {
+    width: 44px;
+    height: 44px;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--pixel);
+    font-size: 18px;
+    flex: 0 0 auto;
+}
+.p-name {
+    font-size: 25px;
+    color: #DDD;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 160px;
+}
+.p-more {
+    font-family: var(--pixel);
+    font-size: 18px;
+    color: var(--muted);
+    padding: 6px 10px;
+}
+
+/* ── 错误卡：MC 断开连接界面风格 ── */
+.err-body {
+    padding: 46px 30px 40px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    gap: 26px;
     text-align: center;
 }
-.error-msg {
-    background: rgba(255,85,85,0.1);
-    padding: 10px 16px;
-    font-size: 13px;
-    color: #ff8888;
-    border: 2px solid rgba(255,85,85,0.3);
-    display: inline-block;
+.err-icon {
+    font-size: 66px;
+    line-height: 1;
+    color: var(--red);
+    text-shadow: 3px 3px 0 #000;
+}
+.err-title {
+    font-size: 54px;
+    font-weight: 700;
+    color: #fff;
+    text-shadow: 3px 3px 0 #000;
+}
+.err-msg {
+    background: rgba(255,85,85,0.08);
+    border: 2px solid rgba(255,85,85,0.35);
+    padding: 18px 30px;
+    font-size: 32px;
+    color: #FF9A9A;
+    max-width: 760px;
+    word-break: break-all;
+}
+.err-addr {
+    font-size: 27px;
+    color: var(--muted);
+}
+
+/* ── 页脚：一行等宽小字 ── */
+.foot {
+    margin-top: 20px;
+    text-align: center;
+    font-family: var(--pixel);
+    font-size: 15px;
+    letter-spacing: 1px;
+    color: rgba(255,255,255,0.42);
 }
 </style>
 
 <div class="card">
-  <div class="header">
-    <span class="server-name">代理服务器</span>
-    <span class="badge badge-proxy">PROXY</span>
+{% set card_accent = 'accent-proxy' if badge == 'PROXY' else ('accent-bedrock' if badge == 'BEDROCK' else 'accent-java') %}
+<div class="panel {{ card_accent }}">
+
+  {% if is_error %}
+  <div class="err-body">
+    <div class="err-icon">✖</div>
+    <div class="err-title">无法连接到服务器</div>
+    <div class="err-msg">{{ error_msg }}</div>
+    <div class="err-addr">{{ server_address }} · {{ edition_label }}</div>
   </div>
 
-  {% if proxy.is_error %}
-  <div class="proxy-info">
-    <div class="error-container">
-      <div class="error-msg">{{ proxy.error_msg }}</div>
-      <div style="font-size: 13px; color: #666; margin-top: 8px;">{{ proxy.address }}</div>
-    </div>
-  </div>
   {% else %}
-  <div class="proxy-info">
-    <div class="proxy-label">在线玩家</div>
-    <div class="proxy-stats">
-      <div class="proxy-players-section">
-        <div class="proxy-players">{{ proxy.online }}<span class="fraction">/{{ proxy.max_players }}</span></div>
-      </div>
-      <div class="proxy-version">
-        <div class="proxy-version-label">代理版本</div>
-        <div class="proxy-version-text">{{ proxy.server_version }}</div>
-        {% if proxy.via_hint %}<div class="proxy-via-tag">{{ proxy.via_hint }}</div>{% endif %}
-      </div>
-    </div>
-    <div class="proxy-motd">{{ proxy.motd_html }}</div>
-  </div>
-  {% endif %}
-
-  {% if has_sub_servers %}
-  <div class="sub-servers-section">
-    <div class="section-title">子服列表 ({{ sub_servers|length }})</div>
-    <div class="sub-servers-grid {% if sub_servers|length > 6 %}compact{% endif %}">
-    {% for sub in sub_servers %}
-    {% if loop.index <= 6 %}
-    <div class="sub-server-item {% if sub_servers|length > 6 %}compact{% endif %} {% if sub.is_error %}error{% elif sub.is_offline %}offline{% endif %}">
-      <div class="sub-server-header">
-        <span class="status-dot {% if sub.is_error %}status-dot-offline{% elif sub.is_offline %}status-dot-not-started{% else %}status-dot-online{% endif %}"></span>
-        <span class="sub-server-name">{{ sub.name }}</span>
-      </div>
-      {% if sub.is_error %}
-      <span class="sub-server-error">{{ sub.error_msg }}</span>
-      {% elif sub.is_offline %}
-      <span class="sub-server-offline">未启动</span>
+  <div class="head">
+    {% if show_server_icon %}
+    <div class="slot icon-slot">
+      {% if icon %}
+      <img src="{{ icon }}" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
+      <div class="icon-letter" style="display:none">{{ server_address[0]|upper }}</div>
       {% else %}
-      <div class="sub-server-status">
-        <span class="sub-server-players">{{ sub.online }}<span class="fraction">/{{ sub.max_players }}</span></span>
-        <span class="sub-server-version">{{ sub.server_version }}</span>
-      </div>
-      <span class="sub-server-motd">{{ sub.motd_html }}</span>
+      <div class="icon-letter">{{ server_address[0]|upper }}</div>
       {% endif %}
     </div>
     {% endif %}
-    {% endfor %}
+    <div class="head-main">
+      <div class="addr-row">
+        <span class="addr">{{ server_address }}</span>
+        <span class="badge">{{ badge }}</span>
+      </div>
+      <div class="meta-row">
+        <span>版本 {{ server_version }}</span>
+        {% if client_version and client_version != server_version %}<span>支持 {{ client_version }}</span>{% endif %}
+        {% if via_hint %}<span class="via-tag">{{ via_hint }}</span>{% endif %}
+      </div>
     </div>
-    {% if sub_servers|length > 6 %}
-    <div class="sub-servers-more">还有 {{ sub_servers|length - 6 }} 个子服未显示...</div>
+    {% if show_latency and latency_ms is not none %}
+    <div class="head-right">
+      <div class="latency-num {{ latency_class }}">{{ latency_ms }}ms</div>
+      <div class="latency-label">查询延迟</div>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="motd-chat">{{ motd_html }}</div>
+
+  <div class="players-block">
+    <div class="xp-row">
+      <div class="xp-nums">{{ online_str }}<span class="fraction"> / {{ max_str }}</span></div>
+      <div class="xp-track"><div class="xp-fill" style="width: {{ percent }}%"></div></div>
+      <div class="xp-pct">{{ percent }}%</div>
+    </div>
+    {% if show_player_list and (player_list or extra_count > 0) %}
+    <div class="avatars">
+      {% for p in player_list %}
+      <div class="p-chip">
+        {% if p.uuid %}
+        <img class="p-head" src="https://mc-heads.net/avatar/{{ p.uuid }}/32" alt=""
+             onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+        <div class="p-fallback" style="display:none; background: rgba(0,0,0,0.5); border: 2px solid {{ p.color }}; color: {{ p.color }}">{{ (p.name or '?')[0]|upper }}</div>
+        {% else %}
+        <div class="p-fallback" style="background: rgba(0,0,0,0.5); border: 2px solid {{ p.color }}; color: {{ p.color }}">{{ (p.name or '?')[0]|upper }}</div>
+        {% endif %}
+        <span class="p-name">{{ p.name }}</span>
+      </div>
+      {% endfor %}
+      {% if extra_count > 0 %}<div class="p-chip p-more">+{{ extra_count }}</div>{% endif %}
+    </div>
     {% endif %}
   </div>
   {% endif %}
 
 </div>
+<div class="foot">{{ footer_text }}</div>
+</div>
 '''
 
+MOTD_HTML_TEMPLATE = _MOTD_TEMPLATE_SRC.replace("__DIRT_TILE__", _DIRT_TILE)
 
-@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "1.7.3")
+
+# ============================================================
+# HTML 模板：代理服务器状态卡片（母服 + 子服列表）
+# 与主卡片共用同一套设计 token / 泥土背景 / 浮雕面板
+# ============================================================
+
+_PROXY_TEMPLATE_SRC = '''
+<meta name="viewport" content="width=1280; height=1">
+<style>
+@import url('https://cdn.jsdelivr.net/npm/@fontsource/press-start-2p@5/index.min.css');
+html, body {
+    margin: 0; padding: 0;
+}
+body {
+    /* ── 设计 token：与主卡片保持一致 ── */
+    --green: #55FF55; --green-xp: #7EFC20; --gold: #FFAA00;
+    --red: #FF5555; --aqua: #55FFFF;
+    --panel: #3F3F3F; --panel-hi: #757575; --panel-lo: #191919;
+    --slot: #2B2B2B; --slot-hi: #141414; --slot-lo: #4E4E4E;
+    --ink: #EDEDED; --muted: #A6A6A6;
+    --pixel: 'Press Start 2P', 'Microsoft YaHei', monospace;
+    --sans: 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif;
+    font-family: var(--sans);
+    color: var(--ink);
+    width: 1280px;
+    box-sizing: border-box;
+    padding: 30px;
+    background-color: #5A3E24;
+    background-image: url("__DIRT_TILE__");
+    background-size: 96px 96px;
+    image-rendering: pixelated;
+    /* 弹性拉伸: 视口多高 body 就撑多高(内容自适应卡在矮内容时也能充满图片) */
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+/* 卡片容器: 拉伸填满 body, 面板再填满卡片 */
+.card {
+    display: flex;
+    flex-direction: column;
+    flex: 1 0 auto;
+}
+.panel {
+    background: var(--panel);
+    border-style: solid;
+    border-width: 4px;
+    border-color: var(--panel-hi) var(--panel-lo) var(--panel-lo) var(--panel-hi);
+    padding: 30px 34px 34px;
+    box-sizing: border-box;
+    flex: 1 0 auto;
+}
+.slot {
+    background: var(--slot);
+    border-style: solid;
+    border-width: 4px;
+    border-color: var(--slot-hi) var(--slot-lo) var(--slot-lo) var(--slot-hi);
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.accent-proxy { --accent: var(--aqua); }
+.accent-java { --accent: var(--green); }
+.accent-bedrock { --accent: var(--gold); }
+
+.head {
+    display: flex;
+    align-items: center;
+    gap: 22px;
+    margin-bottom: 22px;
+    min-width: 0;
+}
+.icon-slot {
+    width: 104px;
+    height: 104px;
+    flex: 0 0 auto;
+}
+.icon-slot img {
+    width: 84px;
+    height: 84px;
+    image-rendering: pixelated;
+}
+.icon-letter {
+    font-family: var(--pixel);
+    font-size: 34px;
+    color: var(--muted);
+    text-shadow: 3px 3px 0 #000;
+}
+.head-main {
+    flex: 1;
+    min-width: 0;
+}
+.addr-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-width: 0;
+}
+.addr {
+    font-size: 54px;
+    font-weight: 700;
+    color: #fff;
+    text-shadow: 3px 3px 0 #000;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+.badge {
+    font-family: var(--pixel);
+    font-size: 16px;
+    line-height: 1;
+    padding: 6px 11px 5px;
+    background: #191919;
+    border: 2px solid var(--accent, var(--muted));
+    color: var(--accent, var(--muted));
+    letter-spacing: 2px;
+    flex: 0 0 auto;
+}
+.meta-row {
+    margin-top: 8px;
+    font-size: 28px;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+}
+.via-tag {
+    font-size: 24px;
+    color: var(--gold);
+    background: rgba(255,170,0,0.12);
+    border: 1px solid rgba(255,170,0,0.4);
+    padding: 3px 10px;
+    flex: 0 0 auto;
+}
+.head-right {
+    flex: 0 0 auto;
+    text-align: right;
+}
+.latency-num {
+    font-family: var(--pixel);
+    font-size: 38px;
+    line-height: 1;
+    letter-spacing: 2px;
+    color: var(--green);
+    text-shadow: 2px 2px 0 #000;
+}
+.latency-num.lat-mid { color: var(--gold); }
+.latency-num.lat-bad { color: var(--red); }
+.latency-label {
+    font-size: 22px;
+    color: var(--muted);
+    letter-spacing: 2px;
+    margin-top: 6px;
+}
+
+/* 母服 MOTD：聊天框样式，限 2 行 */
+.motd-chat {
+    background: rgba(0, 0, 0, 0.55);
+    border: 2px solid #151515;
+    box-shadow: inset 0 0 0 1px #000;
+    padding: 16px 24px;
+    font-size: 32px;
+    line-height: 1.55;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    word-break: break-all;
+}
+
+.xp-row {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    margin-top: 22px;
+}
+.xp-nums {
+    font-family: var(--pixel);
+    font-size: 40px;
+    line-height: 1;
+    letter-spacing: 2px;
+    color: var(--green-xp);
+    text-shadow: 2px 2px 0 #000;
+    flex: 0 0 auto;
+}
+.xp-nums .fraction {
+    font-size: 19px;
+    color: var(--muted);
+}
+.xp-track {
+    flex: 1;
+    height: 24px;
+    background: #131313;
+    border: 2px solid #050505;
+    box-shadow: inset 0 2px 0 rgba(255,255,255,0.08);
+    box-sizing: border-box;
+    min-width: 0;
+}
+.xp-fill {
+    height: 100%;
+    background: repeating-linear-gradient(90deg, #55FF55 0 18px, #43CC43 18px 22px);
+    box-shadow: inset 0 3px 0 rgba(255,255,255,0.45), inset 0 -2px 0 rgba(0,0,0,0.3);
+}
+.xp-pct {
+    font-family: var(--pixel);
+    font-size: 19px;
+    color: var(--green-xp);
+    text-shadow: 2px 2px 0 #000;
+    flex: 0 0 auto;
+    min-width: 68px;
+    text-align: right;
+}
+
+/* 子服列表 */
+.sub-section {
+    margin-top: 26px;
+}
+.sub-title {
+    font-size: 28px;
+    color: var(--muted);
+    letter-spacing: 3px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid #2A2A2A;
+    margin-bottom: 14px;
+}
+.sub-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+}
+.sub-cell {
+    background: rgba(0,0,0,0.38);
+    border: 2px solid #262626;
+    padding: 14px 16px 15px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+    box-sizing: border-box;
+}
+.sub-cell.offline {
+    opacity: 0.78;
+    border-color: #4A3A1A;
+}
+.sub-cell.error {
+    opacity: 0.82;
+    border-color: #4A2020;
+}
+.sub-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+.dot {
+    width: 12px;
+    height: 12px;
+    flex: 0 0 auto;
+    box-shadow: 2px 2px 0 rgba(0,0,0,0.6);
+}
+.dot-online { background: var(--green); box-shadow: 0 0 6px rgba(85,255,85,0.7), 2px 2px 0 rgba(0,0,0,0.6); }
+.dot-offline { background: var(--gold); }
+.dot-error { background: var(--red); box-shadow: 0 0 6px rgba(255,85,85,0.7), 2px 2px 0 rgba(0,0,0,0.6); }
+.sub-name {
+    font-size: 29px;
+    font-weight: 700;
+    color: #fff;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+.sub-players {
+    font-family: var(--pixel);
+    font-size: 18px;
+    line-height: 1;
+    letter-spacing: 1px;
+    color: var(--green-xp);
+    flex: 0 0 auto;
+}
+.sub-players .fraction {
+    font-size: 11px;
+    color: var(--muted);
+}
+.mini-track {
+    height: 12px;
+    background: #131313;
+    border: 2px solid #050505;
+    box-sizing: border-box;
+}
+.mini-fill {
+    height: 100%;
+    background: repeating-linear-gradient(90deg, #55FF55 0 9px, #43CC43 9px 12px);
+}
+.sub-motd {
+    font-size: 23px;
+    color: #999;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+.sub-offline-text {
+    font-size: 23px;
+    color: var(--gold);
+}
+.sub-error-text {
+    font-size: 23px;
+    color: #FF6B6B;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+.sub-more {
+    margin-top: 14px;
+    text-align: center;
+    font-family: var(--sans);
+    font-size: 28px;
+    color: var(--muted);
+}
+
+/* 母服查询失败时的错误块 */
+.err-body {
+    padding: 26px 10px 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    gap: 18px;
+    text-align: center;
+}
+.err-title {
+    font-size: 46px;
+    font-weight: 700;
+    color: #fff;
+    text-shadow: 3px 3px 0 #000;
+}
+.err-msg {
+    background: rgba(255,85,85,0.08);
+    border: 2px solid rgba(255,85,85,0.35);
+    padding: 14px 24px;
+    font-size: 28px;
+    color: #FF9A9A;
+    max-width: 720px;
+    word-break: break-all;
+}
+.err-addr {
+    font-size: 25px;
+    color: var(--muted);
+}
+
+.foot {
+    margin-top: 20px;
+    text-align: center;
+    font-family: var(--pixel);
+    font-size: 15px;
+    letter-spacing: 1px;
+    color: rgba(255,255,255,0.42);
+}
+</style>
+
+<div class="card">
+<div class="panel accent-proxy">
+
+  {% if proxy.is_error %}
+  <div class="head">
+    <div class="head-main">
+      <div class="addr-row">
+        <span class="addr">{{ proxy.address }}</span>
+        <span class="badge">PROXY</span>
+      </div>
+    </div>
+  </div>
+  <div class="err-body">
+    <div class="err-title">无法连接到代理服务器</div>
+    <div class="err-msg">{{ proxy.error_msg }}</div>
+    <div class="err-addr">{{ proxy.address }}</div>
+  </div>
+
+  {% else %}
+  <div class="head">
+    {% if show_server_icon %}
+    <div class="slot icon-slot">
+      {% if proxy.icon %}
+      <img src="{{ proxy.icon }}" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
+      <div class="icon-letter" style="display:none">P</div>
+      {% else %}
+      <div class="icon-letter">P</div>
+      {% endif %}
+    </div>
+    {% endif %}
+    <div class="head-main">
+      <div class="addr-row">
+        <span class="addr">{{ proxy.address }}</span>
+        <span class="badge">PROXY</span>
+      </div>
+      <div class="meta-row">
+        <span>版本 {{ proxy.server_version }}</span>
+        {% if proxy.via_hint %}<span class="via-tag">{{ proxy.via_hint }}</span>{% endif %}
+      </div>
+    </div>
+    {% if show_latency and proxy.latency_ms is not none %}
+    <div class="head-right">
+      <div class="latency-num {{ proxy.latency_class }}">{{ proxy.latency_ms }}ms</div>
+      <div class="latency-label">查询延迟</div>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="motd-chat">{{ proxy.motd_html }}</div>
+
+  <div class="xp-row">
+    <div class="xp-nums">{{ proxy.online_str }}<span class="fraction"> / {{ proxy.max_str }}</span></div>
+    <div class="xp-track"><div class="xp-fill" style="width: {{ proxy.percent }}%"></div></div>
+    <div class="xp-pct">{{ proxy.percent }}%</div>
+  </div>
+  {% endif %}
+
+  {% if has_sub_servers %}
+  <div class="sub-section">
+    <div class="sub-title">子服列表 · {{ sub_servers|length }}</div>
+    <div class="sub-grid">
+    {% for sub in sub_servers %}
+    {% if loop.index <= 9 %}
+    <div class="sub-cell {% if sub.is_error %}error{% elif sub.is_offline %}offline{% endif %}">
+      <div class="sub-head">
+        <span class="dot {% if sub.is_error %}dot-error{% elif sub.is_offline %}dot-offline{% else %}dot-online{% endif %}"></span>
+        <span class="sub-name">{{ sub.name }}</span>
+        {% if not sub.is_error and not sub.is_offline %}
+        <span class="sub-players">{{ sub.online_str }}<span class="fraction">/{{ sub.max_str }}</span></span>
+        {% endif %}
+      </div>
+      {% if sub.is_error %}
+      <div class="sub-error-text">{{ sub.error_msg }}</div>
+      {% elif sub.is_offline %}
+      <div class="mini-track"><div class="mini-fill" style="width: 0%"></div></div>
+      <div class="sub-offline-text">未启动</div>
+      {% else %}
+      <div class="mini-track"><div class="mini-fill" style="width: {{ sub.percent }}%"></div></div>
+      <div class="sub-motd">{{ sub.motd_html }}</div>
+      {% endif %}
+    </div>
+    {% endif %}
+    {% endfor %}
+    </div>
+    {% if sub_servers|length > 9 %}
+    <div class="sub-more">+{{ sub_servers|length - 9 }} 个子服未显示</div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+</div>
+<div class="foot">{{ footer_text }}</div>
+</div>
+'''
+
+PROXY_HTML_TEMPLATE = _PROXY_TEMPLATE_SRC.replace("__DIRT_TILE__", _DIRT_TILE)
+
+
+@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "2.0.0")
 class MOTDPlugin(Star):
     """MOTD 查询插件主类"""
     
@@ -1082,7 +1547,7 @@ class MOTDPlugin(Star):
         super().__init__(context)
         self.config = config
         self._load_config()
-        logger.info(f"[MOTD] 插件初始化完成，版本 1.7.3")
+        logger.info(f"[MOTD] 插件初始化完成，版本 2.0.0")
     
     def _load_config(self):
         """加载插件配置"""
@@ -1093,6 +1558,11 @@ class MOTDPlugin(Star):
         self.admin_only_config = self.config.get("admin_only_config", True)
         self.query_timeout = self.config.get("query_timeout", 5)
         self.use_api = self.config.get("use_api", True)
+
+        # 卡片显示配置
+        self.show_player_list = self.config.get("show_player_list", True)
+        self.show_server_icon = self.config.get("show_server_icon", True)
+        self.show_latency = self.config.get("show_latency", True)
 
         # 代理服务器查询配置
         self.query_type = self.config.get("query_type", "normal")
@@ -1308,8 +1778,9 @@ class MOTDPlugin(Star):
         return server_version, client_version, via_hint
 
     def _motd_to_html(self, motd_data: Any, max_length: int = 0) -> str:
-        """将 MOTD 数据转换为带颜色的 HTML，支持 § 颜色码和 JSON 格式
-        max_length > 0 时，超过该字符数的纯文本会被截断（丢弃颜色信息）
+        """将 MOTD 数据转换为带颜色/格式的 HTML（段式解析）
+        支持: §0-§f 颜色码、§l/§o/§n/§m 格式码、§r 重置、JSON 组件树（含 extra 递归）
+        max_length > 0 时，超过该字符数的纯文本会被截断（丢弃样式信息）
         """
         # 长度预检：提取纯文本，超长则降级为截断后的纯字符串
         if max_length > 0:
@@ -1317,59 +1788,136 @@ class MOTDPlugin(Star):
                 plain = self._format_motd(motd_data)
             else:
                 plain = str(motd_data)
-            if len(plain) > max_length:
-                motd_data = plain[:max_length] + '…'
+            # 视觉长度按剔除 § 码后的文本计算，截断后丢弃样式
+            plain_visible = _MOTD_SECTION_RE.sub('', plain)
+            if len(plain_visible) > max_length:
+                motd_data = plain_visible[:max_length] + '…'
+
+        segments = []
+        _parse_motd_segments(motd_data, _default_motd_state(), segments)
+        html = _render_motd_segments(segments)
+        if html:
+            return html
+        # 空结果兜底：输出转义后的纯文本
+        fallback = self._format_motd(motd_data) if isinstance(motd_data, (dict, list)) else str(motd_data)
+        return _html_escape(fallback or "")
+
+    def _base_card_context(self) -> Dict[str, Any]:
+        """构建卡片模板公共上下文（三个分支共用：主卡 / 错误卡 / 代理卡）"""
+        return {
+            "icon": None,
+            "latency_ms": None, "latency_class": "",
+            "source_label": "",
+            "query_time": time.strftime("%Y-%m-%d %H:%M"),
+            "show_player_list": self.show_player_list,
+            "show_server_icon": self.show_server_icon,
+            "show_latency": self.show_latency,
+        }
+
+    @staticmethod
+    def _players_percent(online: int, max_players: int) -> int:
+        """计算玩家占用百分比（0-100，上限 100，无人数上限时为 0）"""
+        try:
+            online, max_players = int(online), int(max_players)
+        except (ValueError, TypeError):
+            return 0
+        if max_players <= 0:
+            return 0
+        return max(0, min(100, round(online / max_players * 100)))
+
+    @staticmethod
+    def _latency_class(latency_ms: Optional[int]) -> str:
+        """延迟分级样式：<100ms 绿 / <300ms 金 / 其余红"""
+        if latency_ms is None:
+            return ""
+        if latency_ms < 100:
+            return "lat-good"
+        if latency_ms < 300:
+            return "lat-mid"
+        return "lat-bad"
+
+    def _build_footer_text(self, result: Dict[str, Any], ctx: Dict[str, Any]) -> str:
+        """构建页脚文本：查询延迟 · 数据源 · 时间（按配置开关与数据可用性裁剪）"""
+        # 结果中的延迟尚未写入上下文时补写（错误分支等场景）
+        if ctx.get("latency_ms") is None and result.get("latency_ms") is not None:
+            ctx["latency_ms"] = result.get("latency_ms")
+        ctx["latency_class"] = self._latency_class(ctx.get("latency_ms"))
         parts = []
-        current_color = '#ffffff'
+        if self.show_latency and ctx.get("latency_ms") is not None:
+            parts.append(f"{ctx['latency_ms']}ms")
+        source = result.get("source", "")
+        if source:
+            ctx["source_label"] = _SOURCE_LABELS.get(source, source)
+            parts.append(ctx["source_label"])
+        parts.append(ctx["query_time"])
+        return " · ".join(parts)
 
-        def _flush(text: str):
-            if text:
-                escaped = _html_escape(text)
-                if current_color != '#ffffff':
-                    parts.append(f'<span style="color:{current_color}">{escaped}</span>')
-                else:
-                    parts.append(escaped)
+    @staticmethod
+    def _emoji(event: AstrMessageEvent, key: str) -> str:
+        """按场景返回文本前缀 emoji。
 
-        def _walk(data, color):
-            nonlocal current_color
-            if isinstance(data, str):
-                # 处理 § 颜色码
-                segments = re.split(r'(§[0-9a-fk-or])', data)
-                for seg in segments:
-                    m = re.match(r'§([0-9a-f])', seg, re.IGNORECASE)
-                    if m:
-                        code = m.group(1).lower()
-                        _flush('')  # 保存当前颜色段
-                        current_color = MINECRAFT_COLOR_MAP.get(code, current_color)
-                    elif seg:
-                        _flush(seg)
-            elif isinstance(data, dict):
-                c = color
-                if 'color' in data:
-                    c = data['color']
-                if c:
-                    current_color = c
-                _walk(data.get('text', ''), c)
-                for item in data.get('extra', []):
-                    _walk(item, c)
-            elif isinstance(data, list):
-                for item in data:
-                    _walk(item, color)
+        全平台统一使用 Unicode emoji（含 QQ 官方平台）：实测 QQ 官方各消息通道
+        （markdown/content）均不渲染 <emoji:id> 内嵌格式（前者剥离、后者透传字面量），
+        统一 Unicode 方案保证所有平台显示稳定。event 参数保留以备未来按平台定制。
+        """
+        return EMOJI_MAP.get(key, "")
 
-        _walk(motd_data, current_color)
-        _flush('')  # flush remaining
-        return ''.join(parts) if parts else _html_escape(str(motd_data))
+    @staticmethod
+    def _plain_chain(event: AstrMessageEvent, text: str):
+        """构建强制纯文本通道的消息链。
+
+        AstrBot 默认把文本走 markdown(msg_type=2) 通道发送：无 markdown 权限的
+        机器人会发送失败，有权限的也会丢失纯文本排版 → 这里强制 use_markdown(False)
+        走 content 纯文本通道，Unicode emoji 在该通道显示最稳定。
+        其他平台: plain_result 本就是纯文本, use_markdown(False) 无副作用;
+        旧版 AstrBot 若无该 API 则原样返回(行为与之前一致)。
+        """
+        chain = event.plain_result(text)
+        use_md = getattr(chain, "use_markdown", None)
+        if callable(use_md):
+            try:
+                chain = use_md(False)
+            except Exception:
+                pass
+        return chain
+
+    async def _send_card_with_fallback(self, event: AstrMessageEvent, template: str,
+                                       context: Dict[str, Any], build_text) -> bool:
+        """统一降级发送层：
+        1. 渲染模板并发送图片；
+        2. 失败 → 发送文本回退（Unicode emoji，强制 content 纯文本通道）；
+        3. 仍失败 → 仅记日志，不抛出（绝不阻塞主流程）。
+        build_text: callable(context) -> str，构建回退文本
+        """
+        try:
+            # type=png: 官方 t2i 服务默认 jpeg q40 会涂抹像素风细节; PNG 无损(服务端会忽略 png 的 quality)
+            url = await self.html_render(template, context, options={"full_page": True, "type": "png"})
+            await event.send(event.image_result(url))
+            return True
+        except Exception as e:
+            logger.error(f"[MOTD] 图片渲染/发送失败，回退到文本: {e}")
+        text = build_text(context)
+        try:
+            await event.send(self._plain_chain(event, text))
+            return True
+        except Exception as e:
+            logger.error(f"[MOTD] 文本回退发送失败（放弃）: {e}")
+        return False
 
     def _format_response(self, result: Dict[str, Any], server_address: str, is_java: bool = True) -> Dict[str, Any]:
         """格式化查询结果为 HTML 模板上下文字典"""
         if "error" in result:
             logger.info(f"[MOTD] 格式化错误结果: server='{server_address}', error='{result['error']}'")
-            return {
+            ctx = self._base_card_context()
+            ctx.update({
                 "is_error": True, "is_java": is_java,
                 "server_address": server_address,
                 "error_msg": result["error"],
                 "edition_label": "Java" if is_java else "Bedrock",
-            }
+                "badge": "JAVA" if is_java else "BEDROCK",
+                "footer_text": ctx["query_time"],
+            })
+            return ctx
 
         if is_java:
             version_info = result.get("version", {})
@@ -1382,24 +1930,37 @@ class MOTDPlugin(Star):
             motd_html = self._motd_to_html(description, max_length=100)
             online = players_info.get("online", 0)
             max_players = players_info.get("max", 0)
-            sample = players_info.get("sample", [])
-            player_list = [p.get("name", "未知") for p in sample[:10]] if sample else []
-            extra_count = len(sample) - 10 if len(sample) > 10 else 0
+            sample = players_info.get("sample", []) or []
+            # 玩家样例列表：最多显示 8 个，其余计入 +N
+            player_list = []
+            for p in sample[:8]:
+                if isinstance(p, dict):
+                    name = p.get("name") or "未知"
+                    uuid = p.get("uuid") or p.get("id") or ""
+                else:
+                    name, uuid = str(p), ""
+                player_list.append({"name": name, "uuid": uuid, "color": _player_color(name)})
+            extra_count = len(sample) - 8 if len(sample) > 8 else 0
 
             logger.info(f"[MOTD] 格式化结果: server_version='{server_version}', client_version='{client_version}', "
                         f"players={online}/{max_players}, via_hint='{via_hint}'")
 
-            return {
+            ctx = self._base_card_context()
+            ctx.update({
                 "is_error": False, "is_java": True,
                 "server_address": server_address,
-                "edition_label": "Java",
+                "edition_label": "Java", "badge": "JAVA", "icon": result.get("icon"),
                 "server_version": server_version,
                 "client_version": client_version,
                 "via_hint": via_hint,
                 "online": online, "max_players": max_players,
+                "online_str": f"{online:,}", "max_str": f"{max_players:,}",
+                "percent": self._players_percent(online, max_players),
                 "player_list": player_list, "extra_count": extra_count,
                 "motd_html": motd_html,
-            }
+            })
+            ctx["footer_text"] = self._build_footer_text(result, ctx)
+            return ctx
         else:
             motd_html = self._motd_to_html(result.get("motd", "无描述"), max_length=100)
             server_version = result.get("version", "未知")
@@ -1409,17 +1970,21 @@ class MOTDPlugin(Star):
             logger.info(f"[MOTD] 基岩版原始数据: {result}")
             logger.info(f"[MOTD] 基岩版格式化结果: version='{server_version}', players={online}/{max_players}")
 
-            return {
+            ctx = self._base_card_context()
+            ctx.update({
                 "is_error": False, "is_java": False,
                 "server_address": server_address,
-                "edition_label": "Bedrock",
+                "edition_label": "Bedrock", "badge": "BEDROCK", "icon": result.get("icon"),
                 "server_version": server_version,
                 "client_version": server_version,
-                "online": online,
-                "max_players": max_players,
+                "online": online, "max_players": max_players,
+                "online_str": f"{online:,}", "max_str": f"{max_players:,}",
+                "percent": self._players_percent(online, max_players),
                 "player_list": [], "extra_count": 0,
                 "motd_html": motd_html,
-            }
+            })
+            ctx["footer_text"] = self._build_footer_text(result, ctx)
+            return ctx
 
     async def _do_motd_query(self, event: AstrMessageEvent, server: str = "", is_java: bool = True):
         """执行 MOTD 查询的核心逻辑"""
@@ -1439,8 +2004,8 @@ class MOTDPlugin(Star):
         if not server or server.strip() == "":
             # 使用默认服务器
             if not self.default_server:
-                await event.send(event.plain_result(
-                    "❌ 未设置默认服务器\n"
+                await event.send(self._plain_chain(event,
+                    f"{self._emoji(event, 'fail')} 未设置默认服务器\n"
                     "请使用: motd <服务器地址:端口> 查询指定服务器\n"
                     "或联系管理员使用 /motdconfig default <地址:端口> 设置"
                 ))
@@ -1455,8 +2020,12 @@ class MOTDPlugin(Star):
 
         server_address = f"{server}:{port}"
 
-        # 发送查询中提示
-        await event.send(event.plain_result(f"🔍 正在查询服务器 {server_address} ..."))
+        # 发送查询中提示（best-effort：失败不阻塞主查询流程）
+        try:
+            await event.send(self._plain_chain(event,
+                f"{self._emoji(event, 'searching')} 正在查询..."))
+        except Exception as e:
+            logger.warning(f"[MOTD] 查询中提示发送失败（已忽略）: {e}")
 
         # 执行查询
         logger.info(f"[MOTD] 开始执行查询，超时={self.query_timeout}秒")
@@ -1479,21 +2048,30 @@ class MOTDPlugin(Star):
             logger.error(f"[MOTD] 查询异常: {e}")
             result = {"error": f"查询异常: {str(e)}"}
 
-        # 格式化并渲染为图片
+        # 格式化并通过统一降级发送层发送
         context = self._format_response(result, server_address, is_java=is_java)
-        try:
-            url = await self.html_render(MOTD_HTML_TEMPLATE, context, options={"full_page": True})
-            await event.send(event.image_result(url))
-        except Exception as e:
-            logger.error(f"[MOTD] 图片渲染失败，回退到纯文本: {e}")
-            # 回退：纯文本输出
-            if context.get("is_error"):
-                text = f"❌ 查询失败\n服务器: {server_address}\n错误: {context.get('error_msg', '未知')}"
-            else:
-                text = f"🎮 服务器: {server_address}\n版本: {context.get('server_version', '?')}\n玩家: {context.get('online', 0)}/{context.get('max_players', 0)}"
-            await event.send(event.plain_result(text))
-        logger.info("[MOTD] 查询流程完成")
 
+        def build_text(ctx: Dict[str, Any]) -> str:
+            if ctx.get("is_error"):
+                return (
+                    f"{self._emoji(event, 'fail')} 查询失败\n"
+                    f"服务器: {ctx.get('server_address')}\n"
+                    f"错误: {ctx.get('error_msg', '未知')}"
+                )
+            motd_plain = self._format_motd(result.get("description", result.get("motd", "")))
+            motd_line = (motd_plain or "无描述")[:80]
+            lines = [
+                f"{self._emoji(event, 'success')} {ctx.get('server_address')}",
+                f"{self._emoji(event, 'online')} 玩家: {ctx.get('online', 0)}/{ctx.get('max_players', 0)}",
+                f"版本: {ctx.get('server_version', '?')}",
+                f"MOTD: {motd_line}",
+            ]
+            if self.show_latency and ctx.get("latency_ms") is not None:
+                lines.append(f"延迟: {ctx['latency_ms']}ms")
+            return "\n".join(lines)
+
+        await self._send_card_with_fallback(event, MOTD_HTML_TEMPLATE, context, build_text)
+        logger.info("[MOTD] 查询流程完成")
     async def _do_proxy_query(self, event: AstrMessageEvent, server: str = ""):
         """执行代理服务器查询"""
         logger.info(f"[MOTD] 开始代理查询: method={self.proxy_query_method}, server='{server}'")
@@ -1501,8 +2079,8 @@ class MOTDPlugin(Star):
         # 确定代理地址（用于显示）
         if not server or server.strip() == "":
             if not self.default_server:
-                await event.send(event.plain_result(
-                    "❌ 未设置默认服务器\n"
+                await event.send(self._plain_chain(event,
+                    f"{self._emoji(event, 'fail')} 未设置默认服务器\n"
                     "请使用: motd <服务器地址:端口> 查询代理服务器\n"
                     "或联系管理员使用 /motdconfig default <地址:端口> 设置"
                 ))
@@ -1514,8 +2092,12 @@ class MOTDPlugin(Star):
 
         proxy_address = f"{proxy_host}:{proxy_port}"
 
-        # 发送查询中提示
-        await event.send(event.plain_result(f"🔍 正在查询代理服务器 {proxy_address} 及其子服..."))
+        # 发送查询中提示（best-effort：失败不阻塞主查询流程）
+        try:
+            await event.send(self._plain_chain(event,
+                f"{self._emoji(event, 'proxy')} 正在查询..."))
+        except Exception as e:
+            logger.warning(f"[MOTD] 查询中提示发送失败（已忽略）: {e}")
 
         # 先查询代理服务器本身
         try:
@@ -1548,24 +2130,18 @@ class MOTDPlugin(Star):
                 sub_servers_data = result["servers"]
                 errors.extend(result["errors"])
 
-        # 构建模板上下文
+        # 构建模板上下文并通过统一降级发送层发送
         context = self._build_proxy_context(proxy_result, proxy_address, sub_servers_data, errors)
-
-        # 渲染并发送
-        try:
-            url = await self.html_render(PROXY_HTML_TEMPLATE, context, options={"full_page": True})
-            await event.send(event.image_result(url))
-        except Exception as e:
-            logger.error(f"[MOTD] 代理查询图片渲染失败: {e}")
-            # 回退到纯文本
-            text = self._build_proxy_text_response(context, proxy_address)
-            await event.send(event.plain_result(text))
-
+        await self._send_card_with_fallback(
+            event, PROXY_HTML_TEMPLATE, context,
+            lambda ctx: self._build_proxy_text_response(ctx, proxy_address, event)
+        )
         logger.info("[MOTD] 代理查询流程完成")
 
     def _build_proxy_context(self, proxy_result: Dict, proxy_address: str,
                              sub_servers: Dict, errors: list) -> Dict[str, Any]:
         """构建代理查询模板上下文"""
+        ctx = self._base_card_context()
         # 处理代理服务器信息
         if "error" in proxy_result:
             proxy_info = {
@@ -1573,22 +2149,41 @@ class MOTDPlugin(Star):
                 "address": proxy_address,
                 "error_msg": proxy_result["error"]
             }
+            footer_text = ctx["query_time"]
         else:
             version_info = proxy_result.get("version", {})
             players_info = proxy_result.get("players", {})
             description = proxy_result.get("description", "无描述")
             server_version, client_version, via_hint = self._parse_version(version_info)
-
+            online = players_info.get("online", 0)
+            max_players = players_info.get("max", 0)
+            motd_plain = self._format_motd(description) or "无描述"
             proxy_info = {
                 "is_error": False,
                 "address": proxy_address,
                 "server_version": server_version,
                 "client_version": client_version,
                 "via_hint": via_hint,
-                "online": players_info.get("online", 0),
-                "max_players": players_info.get("max", 0),
-                "motd_html": self._motd_to_html(description, max_length=80)
+                "online": online,
+                "max_players": max_players,
+                "online_str": f"{online:,}", "max_str": f"{max_players:,}",
+                "percent": self._players_percent(online, max_players),
+                "motd_html": self._motd_to_html(description, max_length=80),
+                "motd_plain": motd_plain[:100],
+                "icon": proxy_result.get("icon"),
+                "latency_ms": proxy_result.get("latency_ms"),
             }
+            ctx["latency_ms"] = proxy_result.get("latency_ms")
+            ctx["latency_class"] = self._latency_class(ctx["latency_ms"])
+            ctx["icon"] = proxy_result.get("icon")
+            footer_parts = []
+            if self.show_latency and ctx["latency_ms"] is not None:
+                footer_parts.append(f"{ctx['latency_ms']}ms")
+            source = proxy_result.get("source", "")
+            if source:
+                footer_parts.append(_SOURCE_LABELS.get(source, source))
+            footer_parts.append(ctx["query_time"])
+            footer_text = " · ".join(footer_parts)
 
         # 处理子服信息
         sub_servers_list = []
@@ -1598,7 +2193,7 @@ class MOTDPlugin(Star):
                     "name": name,
                     "is_error": True,
                     "is_offline": False,
-                    "error_msg": data["error"]
+                    "error_msg": str(data["error"])[:40]
                 })
             elif data.get("online") is False:
                 # velostat 返回 online=false，表示子服未启动/已关服
@@ -1608,6 +2203,8 @@ class MOTDPlugin(Star):
                     "is_offline": True,
                     "online": 0,
                     "max_players": 0,
+                    "online_str": "0", "max_str": "0",
+                    "percent": 0,
                     "server_version": "未知",
                     "motd_html": ""
                 })
@@ -1616,49 +2213,61 @@ class MOTDPlugin(Star):
                 players_info = data.get("players", {})
                 description = data.get("motd") or data.get("description") or "无描述"
                 server_version, client_version, via_hint = self._parse_version(version_info)
+                online = players_info.get("online", 0)
+                max_players = players_info.get("max", 0)
 
                 sub_servers_list.append({
                     "name": name,
                     "is_error": False,
                     "is_offline": False,
                     "server_version": server_version,
-                    "online": players_info.get("online", 0),
-                    "max_players": players_info.get("max", 0),
-                    "motd_html": self._motd_to_html(description, max_length=30)
+                    "online": online,
+                    "max_players": max_players,
+                    "online_str": f"{online:,}", "max_str": f"{max_players:,}",
+                    "percent": self._players_percent(online, max_players),
+                    "motd_html": self._motd_to_html(description, max_length=60)
                 })
 
-        return {
+        ctx.update({
             "proxy": proxy_info,
             "sub_servers": sub_servers_list,
             "errors": errors,
-            "has_sub_servers": len(sub_servers_list) > 0
-        }
+            "has_sub_servers": len(sub_servers_list) > 0,
+            "footer_text": footer_text,
+        })
+        return ctx
 
-    def _build_proxy_text_response(self, context: Dict, proxy_address: str) -> str:
+    def _build_proxy_text_response(self, context: Dict, proxy_address: str, event: AstrMessageEvent) -> str:
         """构建代理查询纯文本响应（回退用）"""
-        lines = [f"🖥️ 代理服务器: {proxy_address}"]
+        lines = [f"{self._emoji(event, 'proxy')} 代理服务器: {proxy_address}"]
 
         proxy = context.get("proxy", {})
         if proxy.get("is_error"):
-            lines.append(f"❌ 代理查询失败: {proxy.get('error_msg', '未知')}")
+            lines.append(f"{self._emoji(event, 'fail')} 代理查询失败: {proxy.get('error_msg', '未知')}")
         else:
+            lines.append(f"{self._emoji(event, 'online')} 玩家: {proxy.get('online', 0)}/{proxy.get('max_players', 0)}")
             lines.append(f"版本: {proxy.get('server_version', '?')}")
-            lines.append(f"玩家: {proxy.get('online', 0)}/{proxy.get('max_players', 0)}")
+            if proxy.get("motd_plain"):
+                lines.append(f"MOTD: {proxy['motd_plain']}")
+            if self.show_latency and proxy.get("latency_ms") is not None:
+                lines.append(f"延迟: {proxy['latency_ms']}ms")
 
         sub_servers = context.get("sub_servers", [])
         if sub_servers:
-            lines.append("\n📡 子服列表:")
+            lines.append("")
+            lines.append(f"{self._emoji(event, 'proxy')} 子服列表:")
             for sub in sub_servers:
                 if sub.get("is_error"):
-                    lines.append(f"  ❌ {sub['name']}: {sub.get('error_msg', '查询失败')}")
+                    lines.append(f"  {self._emoji(event, 'fail')} {sub['name']}: {sub.get('error_msg', '查询失败')}")
                 elif sub.get("is_offline"):
-                    lines.append(f"  ⚪ {sub['name']}: 未启动")
+                    lines.append(f"  {self._emoji(event, 'offline')} {sub['name']}: 未启动")
                 else:
-                    lines.append(f"  ✅ {sub['name']}: {sub.get('online', 0)}/{sub.get('max_players', 0)} ({sub.get('server_version', '?')})")
+                    lines.append(f"  {self._emoji(event, 'online')} {sub['name']}: {sub.get('online', 0)}/{sub.get('max_players', 0)} ({sub.get('server_version', '?')})")
 
         errors = context.get("errors", [])
         if errors:
-            lines.append("\n⚠️ 错误:")
+            lines.append("")
+            lines.append("⚠️ 错误:")
             for error in errors:
                 lines.append(f"  - {error}")
 
@@ -1736,20 +2345,20 @@ class MOTDPlugin(Star):
         
         # 检查管理员权限
         if not self._is_admin(event):
-            yield event.plain_result("❌ 只有管理员才能使用此指令")
+            yield self._plain_chain(event,f"{self._emoji(event, 'fail')} 只有管理员才能使用此指令")
             return
         
         action = action.lower().strip()
         
         if action == "default":
             if not value:
-                yield event.plain_result("❌ 请提供服务器地址\n用法: /motdconfig default <服务器地址:端口>")
+                yield self._plain_chain(event,f"{self._emoji(event, 'fail')} 请提供服务器地址\n用法: /motdconfig default <服务器地址:端口>")
                 return
             
             server, port = self._parse_server_address(value, is_java=True)
             
             # 验证服务器是否可连接
-            yield event.plain_result(f"🔍 正在验证服务器 {server}:{port} ...")
+            yield self._plain_chain(event, f"{self._emoji(event, 'searching')} 正在验证...")
             
             try:
                 result = await asyncio.wait_for(
@@ -1762,8 +2371,8 @@ class MOTDPlugin(Star):
                 result = {"error": str(e)}
             
             if "error" in result:
-                yield event.plain_result(
-                    f"❌ 无法连接到服务器\n"
+                yield self._plain_chain(event,
+                    f"{self._emoji(event, 'fail')} 无法连接到服务器\n"
                     f"地址: {server}:{port}\n"
                     f"错误: {result['error']}\n"
                     f"请检查地址是否正确，或服务器是否在线"
@@ -1783,8 +2392,8 @@ class MOTDPlugin(Star):
             except Exception as e:
                 logger.error(f"[MOTD] 保存配置失败: {e}")
             
-            yield event.plain_result(
-                f"✅ 默认服务器设置成功\n"
+            yield self._plain_chain(event,
+                f"{self._emoji(event, 'success')} 默认服务器设置成功\n"
                 f"地址: {server}:{port}\n"
                 f"MOTD: {self._format_motd(result.get('description', '无描述'))}"
             )
@@ -1793,7 +2402,7 @@ class MOTDPlugin(Star):
             default = f"{self.default_server}:{self.default_port}" if self.default_server else "未设置"
             sessions = "所有会话" if self.enable_all_sessions else f"{len(self.enabled_sessions)} 个会话"
             
-            yield event.plain_result(
+            yield self._plain_chain(event,
                 f"📋 MOTD 插件配置\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
                 f"🖥️ 默认服务器: {default}\n"
@@ -1804,7 +2413,7 @@ class MOTDPlugin(Star):
             )
         
         else:
-            yield event.plain_result(
+            yield self._plain_chain(event,
                 "❓ 未知操作\n"
                 "可用操作:\n"
                 "  default <地址:端口> - 设置默认服务器\n"
@@ -1815,7 +2424,7 @@ class MOTDPlugin(Star):
     async def on_astrbot_loaded(self):
         """Bot 初始化完成时"""
         logger.info("=" * 50)
-        logger.info("[MOTD] 插件已加载 v1.7.3")
+        logger.info("[MOTD] 插件已加载 v2.0.0")
         logger.info("[MOTD] 支持 ViaVersion/Velocity/BungeeCord 多版本兼容")
         logger.info(f"[MOTD] 默认服务器: {self.default_server}:{self.default_port if self.default_server else '未设置'}")
         logger.info(f"[MOTD] 查询类型: {self.query_type}")
