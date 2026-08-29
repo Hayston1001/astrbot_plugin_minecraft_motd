@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.0.1
+- 按插件市场发布文档补全 metadata.yaml 可选字段：astrbot_version（>=4.17.0）、social_link、tags，并移除非官方平台 key wechatpadpro
+
 ## v2.0.0
 - 视觉全面改版「方块世界」MC 原生像素风：泥土纹理背景、GUI 浮雕面板、物品栏格子槽、聊天框式 MOTD、XP 条式玩家进度条，卡片高度改为内容自适应
 - 新增服务器图标展示（API 图标/直连 favicon 均支持），无图标的服务器显示像素占位块
