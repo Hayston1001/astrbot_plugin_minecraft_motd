@@ -9,13 +9,16 @@ import json
 import time
 import re
 import random
+import os
+import base64
+from pathlib import Path
 import asyncio
 from urllib.parse import quote
 import aiohttp
 from typing import Optional, Dict, Any, Tuple
 
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api import logger, AstrBotConfig
 import astrbot.api.message_components as Comp
 
@@ -321,6 +324,241 @@ def _html_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
+# ============================================================
+# 共享 HTTP 会话（避免每次查询重建连接 / TLS 握手）
+# ============================================================
+_HTTP_SESSION: Optional[aiohttp.ClientSession] = None
+
+
+def _get_http_session() -> aiohttp.ClientSession:
+    """获取全局共享的 aiohttp 会话（懒加载，由插件 terminate() 释放）"""
+    global _HTTP_SESSION
+    if _HTTP_SESSION is None or _HTTP_SESSION.closed:
+        _HTTP_SESSION = aiohttp.ClientSession()
+    return _HTTP_SESSION
+
+
+async def _close_http_session() -> None:
+    """关闭并释放共享会话（插件卸载/重载时调用）"""
+    global _HTTP_SESSION
+    if _HTTP_SESSION is not None and not _HTTP_SESSION.closed:
+        await _HTTP_SESSION.close()
+    _HTTP_SESSION = None
+
+
+# ============================================================
+# 磁盘持久缓存：玩家头像 / 服务器图标
+# 目录规范（AstrBot 插件大文件存储标准）:
+#   data/plugin_data/astrbot_plugin_minecraft_motd/avatars/  玩家头像
+#   data/plugin_data/astrbot_plugin_minecraft_motd/icons/    服务器图标
+# 下载时间写入文件 mtime；TTL 仅作为刷新周期：过期后下次查询尝试重新下载，
+# 下载失败继续使用旧缓存（文件永不因过期删除，仅 /motdr 手动清空）
+# ============================================================
+AVATAR_TTL_HOURS_DEFAULT = 12   # 玩家头像刷新周期（小时，可在配置中调整）
+_NEG_CACHE_TTL = 30 * 60        # 下载失败负缓存时长（内存，秒）：仅限制重试频率，不影响旧缓存展示
+_NEG_CACHE: Dict[str, float] = {}
+
+
+def _get_cache_dir(subdir: str) -> Optional[Path]:
+    """获取缓存子目录（自动创建），失败返回 None"""
+    base: Path
+    try:
+        base = Path(StarTools.get_data_dir("astrbot_plugin_minecraft_motd"))
+    except Exception as e:
+        logger.warning(f"[MOTD] 获取插件数据目录失败，回退到相对路径: {e}")
+        base = Path("data") / "plugin_data" / "astrbot_plugin_minecraft_motd"
+    try:
+        d = base / subdir
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    except OSError as e:
+        logger.warning(f"[MOTD] 创建缓存目录失败（{subdir}）: {e}")
+        return None
+
+
+def _safe_filename(key: str) -> str:
+    """将缓存键转为安全文件名"""
+    return re.sub(r'[^0-9a-zA-Z._-]', '_', key)[:100]
+
+
+def _cache_read_any(path: Path) -> Optional[bytes]:
+    """读取缓存文件（不检查 TTL：即使过期也返回，供“刷新失败沿用旧缓存”使用）"""
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _cache_write(path: Path, data: bytes) -> bool:
+    """写入缓存文件（mtime 即下载时间），失败不抛出"""
+    try:
+        path.write_bytes(data)
+        os.utime(path, None)
+        return True
+    except OSError as e:
+        logger.warning(f"[MOTD] 缓存写入失败（{path.name}）: {e}")
+        return False
+
+
+def clear_disk_cache() -> Tuple[int, int]:
+    """清空头像与图标磁盘缓存及失败负缓存，返回（删除头像数, 删除图标数）"""
+    counts = []
+    for subdir in ("avatars", "icons"):
+        n = 0
+        cache_dir = _get_cache_dir(subdir)
+        if cache_dir is not None:
+            for f in cache_dir.iterdir():
+                try:
+                    if f.is_file():
+                        f.unlink()
+                        n += 1
+                except OSError:
+                    pass
+        counts.append(n)
+    _NEG_CACHE.clear()
+    return counts[0], counts[1]
+
+
+def _normalize_uuid(uuid: str) -> str:
+    """UUID 规范化为带连字符形式（crafatar 等下载源要求），无效返回空串"""
+    u = (uuid or "").strip().lower().replace("-", "")
+    if len(u) != 32 or any(c not in "0123456789abcdef" for c in u):
+        return ""
+    return f"{u[0:8]}-{u[8:12]}-{u[12:16]}-{u[16:20]}-{u[20:32]}"
+
+
+def _avatar_cache_key(uuid: str, name: str) -> str:
+    """头像缓存键：有 UUID 用 UUID，否则用玩家名（保证查询与渲染两侧一致）"""
+    u = _normalize_uuid(uuid)
+    if u:
+        return f"u:{u}"
+    return f"n:{(name or '?').strip().lower()}"
+
+
+def _avatar_source_urls(uuid: str, name: str) -> list:
+    """头像下载源列表（按顺序回退）：UUID 优先，无 UUID 时用玩家名"""
+    urls = []
+    if uuid:
+        urls.append(f"https://mc-heads.net/avatar/{uuid}/32")
+        urls.append(f"https://crafatar.com/avatars/{uuid}?overlay&size=32")
+        urls.append(f"https://minotar.net/helm/{uuid}/32")
+    if name and name != '?':
+        urls.append(f"https://mc-heads.net/avatar/{quote(name)}/32")
+        urls.append(f"https://minotar.net/helm/{quote(name)}/32")
+    return urls
+
+
+async def _fetch_image_bytes(url: str, timeout: float = 2.5) -> Optional[bytes]:
+    """下载图片字节，失败返回 None"""
+    try:
+        async with _get_http_session().get(
+                url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.read()
+            if data and len(data) <= 100_000:  # 32px 头像通常 <5KB，防御异常大响应
+                return data
+    except Exception:
+        pass
+    return None
+
+
+async def get_player_avatars(players: list, ttl_hours: float = AVATAR_TTL_HOURS_DEFAULT) -> Dict[str, str]:
+    """批量获取玩家头像 data URI（磁盘持久缓存 + 多源回退 + 失败负缓存）
+
+    TTL 语义（stale-while-revalidate）：TTL 仅作为刷新周期——
+    - 缓存未过期：直接使用，不发起下载；
+    - 已过期或无缓存：本次查询尝试重新下载；
+    - 下载失败/超时：有旧缓存则继续用旧缓存，从未成功获取过才用占位块；
+    - 缓存文件永不因过期删除（仅 /motdr 手动清空）。
+
+    players: [{"name": str, "uuid": str}, ...]
+    返回: {缓存键: data:image/png;base64,...}
+    """
+    ttl = max(1, int(ttl_hours * 3600))
+    cache_dir = _get_cache_dir("avatars")
+
+    result: Dict[str, str] = {}
+    todo: Dict[str, Tuple[str, str]] = {}  # key -> (uuid, name)
+    now = time.time()
+    for p in players:
+        if not isinstance(p, dict):
+            continue
+        name = (p.get("name") or "?").strip() or "?"
+        uuid = p.get("uuid") or p.get("id") or ""
+        key = _avatar_cache_key(uuid, name)
+        path = cache_dir / f"{_safe_filename(key)}.png" if cache_dir else None
+        data = _cache_read_any(path) if path else None
+        if data is not None:
+            result[key] = "data:image/png;base64," + base64.b64encode(data).decode()
+            try:
+                stale = now - path.stat().st_mtime > ttl
+            except OSError:
+                stale = True
+            if not stale:
+                continue  # 缓存未过期：直接使用，不发起下载
+        # 无缓存或已过期：尝试刷新（负缓存仅限制重试频率，不影响旧缓存展示）
+        if _NEG_CACHE.get(key, 0) + _NEG_CACHE_TTL > now:
+            continue
+        todo[key] = (uuid, name)
+
+    if not todo:
+        return result
+
+    async def _fetch_one(key: str, uuid: str, name: str) -> None:
+        for url in _avatar_source_urls(_normalize_uuid(uuid), name):
+            data = await _fetch_image_bytes(url)
+            if data:
+                result[key] = "data:image/png;base64," + base64.b64encode(data).decode()
+                if cache_dir is not None:
+                    _cache_write(cache_dir / f"{_safe_filename(key)}.png", data)
+                return
+        _NEG_CACHE[key] = time.time()
+        if key in result:
+            logger.info(f"[MOTD] 玩家头像刷新失败，继续使用旧缓存: {name}")
+        else:
+            logger.info(f"[MOTD] 玩家头像获取失败（渲染时用占位块回退）: {name}")
+
+    # 并发拉取；整体限时，超时的玩家沿用旧缓存/占位块，已完成的正常缓存
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*(_fetch_one(k, u, n) for k, (u, n) in todo.items())),
+            timeout=4.0,
+        )
+    except asyncio.TimeoutError:
+        missed = len(todo) - sum(1 for k in todo if k in result)
+        logger.info(f"[MOTD] 玩家头像批量获取超时，{missed} 个沿用旧缓存/占位块")
+    return result
+
+
+def cache_server_icon(server_address: str, icon_data_uri: str) -> None:
+    """将查询结果自带的服务器图标 data URI 写入磁盘缓存（每次成功查询自动刷新）"""
+    if not icon_data_uri or not icon_data_uri.startswith("data:image"):
+        return
+    try:
+        data = base64.b64decode(icon_data_uri.split(",", 1)[1])
+    except Exception:
+        return
+    cache_dir = _get_cache_dir("icons")
+    if cache_dir is not None:
+        _cache_write(cache_dir / f"{_safe_filename(server_address)}.png", data)
+
+
+def get_cached_server_icon(server_address: str) -> Optional[str]:
+    """读取磁盘缓存的服务器图标 data URI（本次查询未返回图标时回退显示）
+
+    不设 TTL 门限：图标随每次查询自带最新值（即“尝试获取”），
+    只要曾经成功获取过就持续沿用旧缓存，从未获取过才返回 None。
+    """
+    cache_dir = _get_cache_dir("icons")
+    if cache_dir is None:
+        return None
+    data = _cache_read_any(cache_dir / f"{_safe_filename(server_address)}.png")
+    if not data:
+        return None
+    return "data:image/png;base64," + base64.b64encode(data).decode()
+
+
 async def query_java_server_api(host: str, port: int = JAVA_DEFAULT_PORT) -> Dict[str, Any]:
     """使用第三方 API 查询 Java 版服务器状态"""
     _t0 = time.perf_counter()
@@ -468,34 +706,53 @@ async def query_java_server_direct(host: str, port: int = JAVA_DEFAULT_PORT, tim
 
 
 async def query_java_server(host: str, port: int = JAVA_DEFAULT_PORT, timeout: int = 5, use_api: bool = True) -> Dict[str, Any]:
-    """查询 Java 版服务器状态，优先使用 API"""
-    if use_api:
-        # 先尝试 API
-        result = await query_java_server_api(host, port)
-        if "error" not in result:
+    """查询 Java 版服务器状态：API 与 TCP 直连并发竞速，谁先成功用谁
+
+    - use_api=False 时仅直连查询；
+    - 直连先成功且协议号 ≤ 0（代理服务器）时，复用竞速中的 API 任务补全带范围的版本名，
+      不再额外发起第二次 API 请求；
+    - 两支都失败时优先返回直连的错误信息（对用户更有指向性）。
+    """
+    if not use_api:
+        return await query_java_server_direct(host, port, timeout)
+
+    api_task = asyncio.create_task(query_java_server_api(host, port))
+    direct_task = asyncio.create_task(query_java_server_direct(host, port, timeout))
+    pending = {api_task, direct_task}
+
+    while pending:
+        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            # 两个查询函数内部均捕获异常并返回 {"error": ...}，task.result() 不会抛出
+            result = task.result()
+            if "error" in result:
+                logger.info(f"[MOTD] 竞速查询一支失败（{result.get('error')}），等待另一支")
+                continue
+            if task is direct_task:
+                # 直连成功
+                proto = result.get("version", {}).get("protocol", 0)
+                version_name = result.get("version", {}).get("name", "")
+                logger.info(f"[MOTD] 直连查询获胜: protocol={proto}, name='{version_name}'")
+                if proto is not None and proto <= 0:
+                    # 代理服务器：等待竞速中的 API 任务补全版本范围
+                    logger.info(f"[MOTD] 直连协议号 {proto} ≤ 0，等待 API 任务补全版本范围")
+                    api_result = await api_task
+                    if "error" not in api_result:
+                        api_name = api_result.get("version", {}).get("name", "")
+                        if api_name and api_name != version_name:
+                            result["version"]["name"] = api_name
+                            logger.info(f"[MOTD] API 补全版本名: '{version_name}' -> '{api_name}'")
+                        else:
+                            logger.info(f"[MOTD] API 版本名相同或为空，无需补全")
+                api_task.cancel()
+                return result
+            # API 先成功：取消直连任务，直接采用（直连通常更快，能被 API 抢先说明直连不可达）
+            direct_task.cancel()
+            logger.info(f"[MOTD] API 查询获胜（{result.get('latency_ms')}ms）")
             return result
-        logger.info(f"[MOTD] API 查询失败，尝试直接查询: {result.get('error')}")
 
-    # API 失败或禁用 API，使用直接查询
-    result = await query_java_server_direct(host, port, timeout)
-
-    # 直连返回协议号 ≤ 0（代理/多版本服务器），补查 API 获取带范围的版本名
-    if "error" not in result:
-        proto = result.get("version", {}).get("protocol", 0)
-        version_name = result.get("version", {}).get("name", "")
-        logger.info(f"[MOTD] 直连查询结果: protocol={proto}, name='{version_name}'")
-        if proto is not None and proto <= 0:
-            logger.info(f"[MOTD] 直连协议号 {proto} ≤ 0，补查 API 获取版本范围")
-            api_result = await query_java_server_api(host, port)
-            if "error" not in api_result:
-                api_name = api_result.get("version", {}).get("name", "")
-                if api_name and api_name != version_name:
-                    result["version"]["name"] = api_name
-                    logger.info(f"[MOTD] API 补全版本名: '{version_name}' -> '{api_name}'")
-                else:
-                    logger.info(f"[MOTD] API 版本名相同或为空，无需补全")
-
-    return result
+    # 两支都失败：返回直连的错误信息
+    return direct_task.result()
 
 
 async def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, timeout: int = 5) -> Dict[str, Any]:
@@ -1049,7 +1306,9 @@ body {
     <div class="avatars">
       {% for p in player_list %}
       <div class="p-chip">
-        {% if p.uuid %}
+        {% if p.avatar %}
+        <img class="p-head" src="{{ p.avatar }}" alt="">
+        {% elif p.uuid %}
         <img class="p-head" src="https://mc-heads.net/avatar/{{ p.uuid }}/32" alt=""
              onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
         <div class="p-fallback" style="display:none; background: rgba(0,0,0,0.5); border: 2px solid {{ p.color }}; color: {{ p.color }}">{{ (p.name or '?')[0]|upper }}</div>
@@ -1539,7 +1798,7 @@ body {
 PROXY_HTML_TEMPLATE = _PROXY_TEMPLATE_SRC.replace("__DIRT_TILE__", _DIRT_TILE)
 
 
-@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "2.0.1")
+@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "2.1.0")
 class MOTDPlugin(Star):
     """MOTD 查询插件主类"""
     
@@ -1547,7 +1806,7 @@ class MOTDPlugin(Star):
         super().__init__(context)
         self.config = config
         self._load_config()
-        logger.info(f"[MOTD] 插件初始化完成，版本 2.0.1")
+        logger.info(f"[MOTD] 插件初始化完成，版本 2.1.0")
     
     def _load_config(self):
         """加载插件配置"""
@@ -1558,6 +1817,10 @@ class MOTDPlugin(Star):
         self.admin_only_config = self.config.get("admin_only_config", True)
         self.query_timeout = self.config.get("query_timeout", 5)
         self.use_api = self.config.get("use_api", True)
+
+        # 头像/图标预取与磁盘缓存
+        self.prefetch_avatars = self.config.get("prefetch_avatars", True)
+        self.avatar_cache_ttl = self.config.get("avatar_cache_ttl", AVATAR_TTL_HOURS_DEFAULT)
 
         # 卡片显示配置
         self.show_player_list = self.config.get("show_player_list", True)
@@ -1827,12 +2090,12 @@ class MOTDPlugin(Star):
 
     @staticmethod
     def _latency_class(latency_ms: Optional[int]) -> str:
-        """延迟分级样式：<100ms 绿 / <300ms 金 / 其余红"""
+        """延迟分级样式：<1000ms 绿 / <3000ms 金 / 其余红"""
         if latency_ms is None:
             return ""
-        if latency_ms < 100:
+        if latency_ms < 1000:
             return "lat-good"
-        if latency_ms < 300:
+        if latency_ms < 3000:
             return "lat-mid"
         return "lat-bad"
 
@@ -1904,8 +2167,27 @@ class MOTDPlugin(Star):
             logger.error(f"[MOTD] 文本回退发送失败（放弃）: {e}")
         return False
 
-    def _format_response(self, result: Dict[str, Any], server_address: str, is_java: bool = True) -> Dict[str, Any]:
-        """格式化查询结果为 HTML 模板上下文字典"""
+    def _resolve_icon(self, result: Dict[str, Any], server_address: str) -> Optional[str]:
+        """服务器图标缓存策略：
+        本次查询带图标 → 写入/刷新磁盘缓存并返回；
+        未带图标 → 回退显示 TTL 内的上一次缓存图标（无则 None，渲染为首字母占位块）
+        """
+        icon = result.get("icon")
+        if icon:
+            cache_server_icon(server_address, icon)
+            return icon
+        cached = get_cached_server_icon(server_address)
+        if cached:
+            logger.info(f"[MOTD] 本次查询未返回图标，使用磁盘缓存图标: {server_address}")
+        return cached
+
+    def _format_response(self, result: Dict[str, Any], server_address: str, is_java: bool = True,
+                         avatars: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """格式化查询结果为 HTML 模板上下文字典
+
+        avatars: 预取的玩家头像映射（缓存键 -> data URI），由 _do_motd_query 在查询后预取；
+                为空时玩家列表仅携带 UUID，由渲染端在线拉取（旧行为）
+        """
         if "error" in result:
             logger.info(f"[MOTD] 格式化错误结果: server='{server_address}', error='{result['error']}'")
             ctx = self._base_card_context()
@@ -1939,7 +2221,12 @@ class MOTDPlugin(Star):
                     uuid = p.get("uuid") or p.get("id") or ""
                 else:
                     name, uuid = str(p), ""
-                player_list.append({"name": name, "uuid": uuid, "color": _player_color(name)})
+                entry = {"name": name, "uuid": uuid, "color": _player_color(name)}
+                if avatars:
+                    avatar_uri = avatars.get(_avatar_cache_key(uuid, name))
+                    if avatar_uri:
+                        entry["avatar"] = avatar_uri
+                player_list.append(entry)
             extra_count = len(sample) - 8 if len(sample) > 8 else 0
 
             logger.info(f"[MOTD] 格式化结果: server_version='{server_version}', client_version='{client_version}', "
@@ -1949,7 +2236,7 @@ class MOTDPlugin(Star):
             ctx.update({
                 "is_error": False, "is_java": True,
                 "server_address": server_address,
-                "edition_label": "Java", "badge": "JAVA", "icon": result.get("icon"),
+                "edition_label": "Java", "badge": "JAVA", "icon": self._resolve_icon(result, server_address),
                 "server_version": server_version,
                 "client_version": client_version,
                 "via_hint": via_hint,
@@ -2048,8 +2335,20 @@ class MOTDPlugin(Star):
             logger.error(f"[MOTD] 查询异常: {e}")
             result = {"error": f"查询异常: {str(e)}"}
 
+        # 预取玩家头像（磁盘缓存命中则零开销），渲染时内嵌 data URI，
+        # 避免渲染服务器的浏览器临时拉取 mc-heads 失败/限流导致头像缺失
+        avatar_map: Dict[str, str] = {}
+        if (self.prefetch_avatars and self.show_player_list and is_java
+                and "error" not in result):
+            try:
+                _sample = result.get("players", {}).get("sample", []) or []
+                avatar_map = await get_player_avatars(_sample[:8], self.avatar_cache_ttl)
+                logger.info(f"[MOTD] 头像预取完成: {len(avatar_map)}/{min(len(_sample), 8)} 个")
+            except Exception as e:
+                logger.warning(f"[MOTD] 玩家头像预取失败（不影响查询结果）: {e}")
+
         # 格式化并通过统一降级发送层发送
-        context = self._format_response(result, server_address, is_java=is_java)
+        context = self._format_response(result, server_address, is_java=is_java, avatars=avatar_map)
 
         def build_text(ctx: Dict[str, Any]) -> str:
             if ctx.get("is_error"):
@@ -2158,6 +2457,8 @@ class MOTDPlugin(Star):
             online = players_info.get("online", 0)
             max_players = players_info.get("max", 0)
             motd_plain = self._format_motd(description) or "无描述"
+            resolved_icon = self._resolve_icon(proxy_result, proxy_address)
+
             proxy_info = {
                 "is_error": False,
                 "address": proxy_address,
@@ -2170,12 +2471,12 @@ class MOTDPlugin(Star):
                 "percent": self._players_percent(online, max_players),
                 "motd_html": self._motd_to_html(description, max_length=80),
                 "motd_plain": motd_plain[:100],
-                "icon": proxy_result.get("icon"),
+                "icon": resolved_icon,
                 "latency_ms": proxy_result.get("latency_ms"),
             }
             ctx["latency_ms"] = proxy_result.get("latency_ms")
             ctx["latency_class"] = self._latency_class(ctx["latency_ms"])
-            ctx["icon"] = proxy_result.get("icon")
+            ctx["icon"] = resolved_icon
             footer_parts = []
             if self.show_latency and ctx["latency_ms"] is not None:
                 footer_parts.append(f"{ctx['latency_ms']}ms")
@@ -2332,6 +2633,30 @@ class MOTDPlugin(Star):
         logger.info(f"[MOTD] 收到 /motd-bedrock 指令: server='{server}'")
         await self._do_motd_query(event, server, is_java=False)
 
+    @filter.command("motdr")
+    async def motd_refresh_cmd(self, event: AstrMessageEvent):
+        """清空头像/图标缓存指令（/motdconfig refresh 的简写）"""
+        # 获取原始消息，检查是否以 / 开头
+        message_str = event.message_str.strip()
+        if not message_str.startswith('/'):
+            logger.info(f"[MOTD] /motdr 指令被跳过（消息不以 / 开头）")
+            return
+        
+        logger.info(f"[MOTD] 收到 /motdr 指令")
+        
+        # 检查管理员权限
+        if not self._is_admin(event):
+            yield self._plain_chain(event, f"{self._emoji(event, 'fail')} 只有管理员才能使用此指令")
+            return
+        
+        # 立即刷新：清空头像/图标磁盘缓存，下次查询重新下载
+        avatar_count, icon_count = clear_disk_cache()
+        yield self._plain_chain(event,
+            f"{self._emoji(event, 'success')} 缓存已清空，下次查询将重新下载\n"
+            f"👤 玩家头像: {avatar_count} 个\n"
+            f"🖼️ 服务器图标: {icon_count} 个"
+        )
+
     @filter.command("motdconfig")
     async def motd_config_cmd(self, event: AstrMessageEvent, action: str = "", value: str = ""):
         """MOTD 插件配置指令"""
@@ -2409,7 +2734,9 @@ class MOTDPlugin(Star):
                 f"💬 生效范围: {sessions}\n"
                 f"🔒 仅管理员配置: {'是' if self.admin_only_config else '否'}\n"
                 f"⏱️ 查询超时: {self.query_timeout}秒\n"
-                f"🌐 使用 API 查询: {'是' if self.use_api else '否'}"
+                f"🌐 使用 API 竞速查询: {'是' if self.use_api else '否'}\n"
+                f"👤 头像预取: {'开启' if self.prefetch_avatars else '关闭'}(刷新周期 {self.avatar_cache_ttl} 小时)\n"
+                f"🖼️ 图标缓存: 保留最后一次成功获取(/motdr 清空)"
             )
         
         else:
@@ -2417,14 +2744,15 @@ class MOTDPlugin(Star):
                 "❓ 未知操作\n"
                 "可用操作:\n"
                 "  default <地址:端口> - 设置默认服务器\n"
-                "  get - 查看当前配置"
+                "  get - 查看当前配置\n"
+                "  缓存刷新请使用 /motdr (清空头像/图标缓存, 立即刷新)"
             )
 
     @filter.on_astrbot_loaded()
     async def on_astrbot_loaded(self):
         """Bot 初始化完成时"""
         logger.info("=" * 50)
-        logger.info("[MOTD] 插件已加载 v2.0.1")
+        logger.info("[MOTD] 插件已加载 v2.1.0")
         logger.info("[MOTD] 支持 ViaVersion/Velocity/BungeeCord 多版本兼容")
         logger.info(f"[MOTD] 默认服务器: {self.default_server}:{self.default_port if self.default_server else '未设置'}")
         logger.info(f"[MOTD] 查询类型: {self.query_type}")
@@ -2436,4 +2764,11 @@ class MOTDPlugin(Star):
                 logger.info(f"[MOTD] 子服列表: {self.sub_servers_config or '未配置'}")
         logger.info(f"[MOTD] 对所有会话生效: {self.enable_all_sessions}")
         logger.info(f"[MOTD] 使用 API 查询: {self.use_api}")
+        logger.info(f"[MOTD] 头像预取: {'开启' if self.prefetch_avatars else '关闭'}, 头像刷新周期 {self.avatar_cache_ttl} 小时, 图标缓存保留最后一次成功获取")
+
         logger.info("=" * 50)
+
+    async def terminate(self):
+        """插件被禁用/重载时释放资源：关闭共享 HTTP 会话"""
+        await _close_http_session()
+        logger.info("[MOTD] 插件已卸载，共享 HTTP 会话已关闭")

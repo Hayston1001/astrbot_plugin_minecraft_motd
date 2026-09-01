@@ -65,10 +65,22 @@
         "default": 5
     },
     "use_api": {
-        "description": "使用 API 查询服务器",
+        "description": "使用 API 竞速查询服务器",
         "type": "bool",
-        "hint": "开启后使用 mcstatus.io API 查询, 更稳定可靠。关闭则使用直接连接查询。",
+        "hint": "开启后 mcstatus.io API 与 TCP 直连并发竞速, 谁先返回用谁(更快); 关闭则仅直连查询",
         "default": true
+    },
+    "prefetch_avatars": {
+        "description": "预取玩家头像",
+        "type": "bool",
+        "hint": "开启后插件预先下载玩家头像并内嵌到渲染图, 大幅提高头像显示成功率(带磁盘缓存, 命中缓存零开销)",
+        "default": true
+    },
+    "avatar_cache_ttl": {
+        "description": "头像刷新周期(小时)",
+        "type": "int",
+        "hint": "超过该时长后下次查询尝试重新下载头像, 下载失败继续使用旧缓存(不会显示占位块, 缓存文件也不会因过期删除)。可用 /motdr 立即刷新",
+        "default": 12
     },
     "show_server_icon": {
         "description": "显示服务器图标",
