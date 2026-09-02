@@ -23,7 +23,7 @@
         "type": "string",
         "options": ["velostat", "direct"],
         "default": "velostat",
-        "hint": "velostat: 通过velostat插件HTTP API查询(仅支持Velocity, BungeeCord无此插件); direct: 手动配置子服地址分别查询",
+        "hint": "velostat: 通过velostat插件HTTP API查询(仅支持Velocity); direct: 手动配置子服地址分别查询",
         "condition": {"query_type": "proxy"}
     },
     "velostat_api_url": {
@@ -37,25 +37,26 @@
         "description": "子服地址列表",
         "type": "string",
         "default": "",
-        "hint": "子服地址, 格式: 服务器名:host:port,服务器名:host:port(逗号分隔多个子服)",
+        "hint": "子服地址, 格式: 服务器名:host:port,服务器名:host:port(逗号分隔)",
         "condition": {"query_type": "proxy", "proxy_query_method": "direct"}
     },
     "enable_all_sessions": {
         "description": "对所有会话生效",
         "type": "bool",
-        "hint": "开启后, 所有群聊和私聊都可以使用此插件",
+        "hint": "所有群聊和私聊都可以使用此插件",
         "default": true
     },
     "enabled_sessions": {
         "description": "允许使用插件的会话列表",
         "type": "list",
-        "hint": "当[对所有会话生效]关闭时, 只有这些会话可以使用插件。会话ID格式: 平台名:消息类型:ID",
-        "default": []
+        "hint": "当[对所有会话生效]关闭时, 只有这些会话可以使用插件. 会话ID格式: 平台名:消息类型:ID",
+        "default": [],
+        "condition": {"enable_all_sessions": false}
     },
     "admin_only_config": {
         "description": "仅管理员可修改配置",
         "type": "bool",
-        "hint": "开启后, 只有 AstrBot 平台配置中的管理员才能使用 motd-config 指令",
+        "hint": "仅 AstrBot 平台配置中的管理员才能使用 motd-config 指令",
         "default": true
     },
     "query_timeout": {
@@ -67,37 +68,63 @@
     "use_api": {
         "description": "使用 API 竞速查询服务器",
         "type": "bool",
-        "hint": "开启后 mcstatus.io API 与 TCP 直连并发竞速, 谁先返回用谁(更快); 关闭则仅直连查询",
+        "hint": "mcstatus.io API 与 TCP 直连并发竞速(更快); 关闭则仅直连查询",
         "default": true
+    },
+    "output_mode": {
+        "description": "输出模式",
+        "type": "string",
+        "options": ["image", "text"],
+        "default": "image",
+        "hint": "image: 渲染像素风状态卡片并发送图片; text: 仅发送纯文本"
+    },
+    "card_height_mode": {
+        "description": "卡片高度模式",
+        "type": "string",
+        "options": ["auto", "fixed"],
+        "default": "auto",
+        "hint": "auto: 高度随内容自适应, 紧凑无留白; fixed: 固定高度(720px, 下方补白)",
+        "condition": {"output_mode": "image"}
     },
     "prefetch_avatars": {
         "description": "预取玩家头像",
         "type": "bool",
-        "hint": "开启后插件预先下载玩家头像并内嵌到渲染图, 大幅提高头像显示成功率(带磁盘缓存, 命中缓存零开销)",
-        "default": true
+        "hint": "插件预先下载玩家头像并内嵌到渲染图, 命中缓存零开销",
+        "default": true,
+        "condition": {"output_mode": "image"}
     },
     "avatar_cache_ttl": {
         "description": "头像刷新周期(小时)",
         "type": "int",
-        "hint": "超过该时长后下次查询尝试重新下载头像, 下载失败继续使用旧缓存(不会显示占位块, 缓存文件也不会因过期删除)。可用 /motdr 立即刷新",
-        "default": 12
+        "hint": "超过该时长后重新下载头像, 失败则使用旧缓存. 用 /motdr 刷新缓存",
+        "default": 12,
+        "condition": {"output_mode": "image"}
+    },
+    "avatar_neg_cache_ttl": {
+        "description": "头像下载失败负缓存(分钟)",
+        "type": "int",
+        "hint": "头像下载失败后, 该时长内不再重复尝试下载; 0 为关闭负缓存; 建议混合登录的服务器适当延长此值",
+        "default": 10,
+        "condition": {"output_mode": "image"}
     },
     "show_server_icon": {
         "description": "显示服务器图标",
         "type": "bool",
-        "hint": "开启后卡片上显示服务器图标, 无图标的服务器显示像素占位块",
-        "default": true
+        "hint": "卡片显示服务器图标, 无图标显示占位块",
+        "default": true,
+        "condition": {"output_mode": "image"}
     },
     "show_player_list": {
         "description": "显示在线玩家列表",
         "type": "bool",
-        "hint": "开启后卡片上显示在线玩家的头像和昵称(最多 8 个, 超出显示 +N)。头像来自外部服务, 加载失败不影响卡片",
-        "default": true
+        "hint": "卡片显示在线玩家的头像和昵称",
+        "default": true,
+        "condition": {"output_mode": "image"}
     },
     "show_latency": {
         "description": "显示查询延迟",
         "type": "bool",
-        "hint": "开启后卡片显示本次查询耗时(毫秒), 并在页脚展示数据源信息",
+        "hint": "显示查询耗时",
         "default": true
     }
 }

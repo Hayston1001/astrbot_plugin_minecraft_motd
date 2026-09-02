@@ -356,8 +356,9 @@ async def _close_http_session() -> None:
 # 下载失败继续使用旧缓存（文件永不因过期删除，仅 /motdr 手动清空）
 # ============================================================
 AVATAR_TTL_HOURS_DEFAULT = 12   # 玩家头像刷新周期（小时，可在配置中调整）
-_NEG_CACHE_TTL = 10 * 60        # 下载失败负缓存时长（内存，秒）：仅限制重试频率，不影响旧缓存展示
+NEG_CACHE_TTL_MINUTES_DEFAULT = 10   # 头像下载失败负缓存默认时长（分钟，可在配置 avatar_neg_cache_ttl 中调整，0=关闭）
 _NEG_CACHE: Dict[str, float] = {}
+_AVATAR_FETCH_SEM = asyncio.Semaphore(4)  # 头像并发下载上限: 削弱冷缓存时 8 路并发 TLS 握手在单核弱机上的 CPU 尖刺
 
 
 def _get_cache_dir(subdir: str) -> Optional[Path]:
@@ -485,7 +486,8 @@ async def _fetch_image_bytes(url: str, timeout: float = 2.5) -> Optional[bytes]:
     return None
 
 
-async def get_player_avatars(players: list, ttl_hours: float = AVATAR_TTL_HOURS_DEFAULT) -> Dict[str, str]:
+async def get_player_avatars(players: list, ttl_hours: float = AVATAR_TTL_HOURS_DEFAULT,
+                             neg_ttl_minutes: float = NEG_CACHE_TTL_MINUTES_DEFAULT) -> Dict[str, str]:
     """批量获取玩家头像 data URI（磁盘持久缓存 + 多源回退 + 失败负缓存）
 
     TTL 语义（stale-while-revalidate）：TTL 仅作为刷新周期——
@@ -493,12 +495,14 @@ async def get_player_avatars(players: list, ttl_hours: float = AVATAR_TTL_HOURS_
     - 已过期或无缓存：本次查询尝试重新下载；
     - 离线模式 UUID（盗版服按名推导）：本地判定后完全跳过下载，渲染用占位块；
     - 下载失败/超时：有旧缓存则继续用旧缓存，从未成功获取过才用占位块；
+    - 下载失败负缓存（neg_ttl_minutes，分钟，0=关闭）：失败后该时长内不再重试，仅限制重试频率，不影响旧缓存展示。
     - 缓存文件永不因过期删除（仅 /motdr 手动清空）。
 
     players: [{"name": str, "uuid": str}, ...]
     返回: {缓存键: data:image/png;base64,...}
     """
     ttl = max(1, int(ttl_hours * 3600))
+    neg_ttl = max(0.0, float(neg_ttl_minutes)) * 60  # 负缓存时长（秒），0=关闭负缓存
     cache_dir = _get_cache_dir("avatars")
 
     result: Dict[str, str] = {}
@@ -522,7 +526,7 @@ async def get_player_avatars(players: list, ttl_hours: float = AVATAR_TTL_HOURS_
             if not stale:
                 continue  # 缓存未过期：直接使用，不发起下载
         # 无缓存或已过期：尝试刷新（负缓存仅限制重试频率，不影响旧缓存展示）
-        if _NEG_CACHE.get(key, 0) + _NEG_CACHE_TTL > now:
+        if neg_ttl > 0 and _NEG_CACHE.get(key, 0) + neg_ttl > now:
             continue
         if _is_offline_uuid(uuid, name):
             # 离线模式 UUID（盗版服）：Mojang 库无此档案，UUID 头像源必然 404，
@@ -538,20 +542,22 @@ async def get_player_avatars(players: list, ttl_hours: float = AVATAR_TTL_HOURS_
         return result
 
     async def _fetch_one(key: str, uuid: str, name: str) -> None:
-        for url in _avatar_source_urls(_normalize_uuid(uuid), name):
-            data = await _fetch_image_bytes(url)
-            if data:
-                result[key] = "data:image/png;base64," + base64.b64encode(data).decode()
-                if cache_dir is not None:
-                    _cache_write(cache_dir / f"{_safe_filename(key)}.png", data)
-                return
-        _NEG_CACHE[key] = time.time()
+        # 并发闸门: 限制同时在飞的下载/TLS 握手数, 避免冷缓存时瞬时 CPU 尖刺拖慢单核弱机
+        async with _AVATAR_FETCH_SEM:
+            for url in _avatar_source_urls(_normalize_uuid(uuid), name):
+                data = await _fetch_image_bytes(url)
+                if data:
+                    result[key] = "data:image/png;base64," + base64.b64encode(data).decode()
+                    if cache_dir is not None:
+                        _cache_write(cache_dir / f"{_safe_filename(key)}.png", data)
+                    return
+            _NEG_CACHE[key] = time.time()
         if key in result:
             logger.info(f"[MOTD] 玩家头像刷新失败，继续使用旧缓存: {name}")
         else:
             logger.info(f"[MOTD] 玩家头像获取失败（渲染时用占位块回退）: {name}")
 
-    # 并发拉取；整体限时，超时的玩家沿用旧缓存/占位块，已完成的正常缓存
+    # 并发拉取(最多 _AVATAR_FETCH_SEM 路同时在飞)；整体限时，超时的玩家沿用旧缓存/占位块，已完成的正常缓存
     try:
         await asyncio.wait_for(
             asyncio.gather(*(_fetch_one(k, u, n) for k, (u, n) in todo.items())),
@@ -595,64 +601,65 @@ async def query_java_server_api(host: str, port: int = JAVA_DEFAULT_PORT) -> Dic
     """使用第三方 API 查询 Java 版服务器状态"""
     _t0 = time.perf_counter()
     try:
-        async with aiohttp.ClientSession() as session:
-            url = f"https://api.mcstatus.io/v2/status/java/{host}:{port}"
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get("online"):
-                        version_data = data.get("version", {})
-                        # Bug Fix: API 返回的是 name_raw/name_clean，不是 name
-                        version_name_raw = version_data.get("name_raw") or version_data.get("name_clean") or version_data.get("name", "")
-                        protocol_raw = version_data.get("protocol")
+        # 复用全局共享 HTTP 会话：省去每次查询的 TCP+TLS 握手（弱机 CPU 更省、延迟更低），会话由 terminate() 统一释放
+        session = _get_http_session()
+        url = f"https://api.mcstatus.io/v2/status/java/{host}:{port}"
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data.get("online"):
+                    version_data = data.get("version", {})
+                    # Bug Fix: API 返回的是 name_raw/name_clean，不是 name
+                    version_name_raw = version_data.get("name_raw") or version_data.get("name_clean") or version_data.get("name", "")
+                    protocol_raw = version_data.get("protocol")
 
-                        logger.info(f"[MOTD] API 返回原始数据: version.name_raw='{version_data.get('name_raw')}', "
-                                    f"version.name_clean='{version_data.get('name_clean')}', "
-                                    f"version.name='{version_data.get('name')}', "
-                                    f"version.protocol={protocol_raw}")
+                    logger.info(f"[MOTD] API 返回原始数据: version.name_raw='{version_data.get('name_raw')}', "
+                                f"version.name_clean='{version_data.get('name_clean')}', "
+                                f"version.name='{version_data.get('name')}', "
+                                f"version.protocol={protocol_raw}")
 
-                        # API 返回 protocol: null 时，尝试从版本名反查协议号
-                        if protocol_raw is None:
-                            logger.info(f"[MOTD] API 返回 protocol=null，尝试从版本名反查")
-                            protocol_raw = _lookup_protocol_from_name(version_name_raw)
-                            if protocol_raw is not None:
-                                logger.info(f"[MOTD] 从版本名 '{version_name_raw}' 反查到协议 {protocol_raw}")
-                            else:
-                                # 反查失败，尝试直连查询补全协议号
-                                logger.info(f"[MOTD] 版本名反查失败，尝试直连查询补全")
-                                direct = await query_java_server_direct(host, port)
-                                if "error" not in direct and "version" in direct:
-                                    protocol_raw = direct["version"].get("protocol")
-                                    if protocol_raw is not None:
-                                        logger.info(f"[MOTD] 直连查询补全协议号: {protocol_raw}")
-                                    else:
-                                        logger.info(f"[MOTD] 直连查询也未返回协议号")
-
-                        players_data = data.get("players", {})
-                        # 玩家样例列表（mcstatus.io v2 字段为 list，直连为 sample，统一映射为 sample）
-                        sample = [
-                            {"name": p.get("name_clean") or p.get("name_raw") or p.get("name", ""), "uuid": p.get("uuid", "")}
-                            for p in (players_data.get("list") or []) if isinstance(p, dict)
-                        ]
-                        # MOTD 自渲染：优先取 raw JSON 组件树（保留颜色/格式），回退纯文本
-                        motd_data = data.get("motd", {})
-                        if isinstance(motd_data, dict):
-                            description = motd_data.get("raw") or motd_data.get("clean") or "无描述"
+                    # API 返回 protocol: null 时，尝试从版本名反查协议号
+                    if protocol_raw is None:
+                        logger.info(f"[MOTD] API 返回 protocol=null，尝试从版本名反查")
+                        protocol_raw = _lookup_protocol_from_name(version_name_raw)
+                        if protocol_raw is not None:
+                            logger.info(f"[MOTD] 从版本名 '{version_name_raw}' 反查到协议 {protocol_raw}")
                         else:
-                            description = motd_data or "无描述"
+                            # 反查失败，尝试直连查询补全协议号
+                            logger.info(f"[MOTD] 版本名反查失败，尝试直连查询补全")
+                            direct = await query_java_server_direct(host, port)
+                            if "error" not in direct and "version" in direct:
+                                protocol_raw = direct["version"].get("protocol")
+                                if protocol_raw is not None:
+                                    logger.info(f"[MOTD] 直连查询补全协议号: {protocol_raw}")
+                                else:
+                                    logger.info(f"[MOTD] 直连查询也未返回协议号")
 
-                        return {
-                            "version": {"name": version_name_raw, "protocol": protocol_raw if protocol_raw is not None else 0},
-                            "players": {"online": players_data.get("online", 0), "max": players_data.get("max", 0), "sample": sample},
-                            "description": description,
-                            "icon": data.get("icon"),
-                            "latency_ms": round((time.perf_counter() - _t0) * 1000),
-                            "source": "api",
-                        }
+                    players_data = data.get("players", {})
+                    # 玩家样例列表（mcstatus.io v2 字段为 list，直连为 sample，统一映射为 sample）
+                    sample = [
+                        {"name": p.get("name_clean") or p.get("name_raw") or p.get("name", ""), "uuid": p.get("uuid", "")}
+                        for p in (players_data.get("list") or []) if isinstance(p, dict)
+                    ]
+                    # MOTD 自渲染：优先取 raw JSON 组件树（保留颜色/格式），回退纯文本
+                    motd_data = data.get("motd", {})
+                    if isinstance(motd_data, dict):
+                        description = motd_data.get("raw") or motd_data.get("clean") or "无描述"
                     else:
-                        return {"error": "服务器离线或无法访问"}
+                        description = motd_data or "无描述"
+
+                    return {
+                        "version": {"name": version_name_raw, "protocol": protocol_raw if protocol_raw is not None else 0},
+                        "players": {"online": players_data.get("online", 0), "max": players_data.get("max", 0), "sample": sample},
+                        "description": description,
+                        "icon": data.get("icon"),
+                        "latency_ms": round((time.perf_counter() - _t0) * 1000),
+                        "source": "api",
+                    }
                 else:
-                    return {"error": f"API 请求失败: {resp.status}"}
+                    return {"error": "服务器离线或无法访问"}
+            else:
+                return {"error": f"API 请求失败: {resp.status}"}
     except asyncio.TimeoutError:
         return {"error": "API 请求超时"}
     except Exception as e:
@@ -970,6 +977,8 @@ _DIRT_TILE = _build_dirt_tile_data_uri()
 
 
 _MOTD_TEMPLATE_SRC = '''
+<!-- astrbot-t2i-shiki-runtime: 本卡片无代码块, 携带此标记 ID 使 AstrBot 跳过注入 1.2MB Shiki 代码高亮运行时,
+     上传到云端渲染服务(t2i_endpoint)的体积从 ~1.3MB 降到 ~50KB, 弱机/小水管显著减负 -->
 <meta name="viewport" content="width=1280; height=1">
 <style>
 @import url('https://cdn.jsdelivr.net/npm/@fontsource/press-start-2p@5/index.min.css');
@@ -994,8 +1003,9 @@ body {
     background-image: url("__DIRT_TILE__");
     background-size: 96px 96px;
     image-rendering: pixelated;
-    /* 弹性拉伸: 视口多高 body 就撑多高(内容自适应卡在矮内容时也能充满图片) */
-    min-height: 100vh;
+    /* 卡片高度: card_height_mode=auto → 100vh(视口高1px, 高度贴内容自适应);
+       fixed → 显式固定高度, 观感与 v2.2.0 及以前的固定尺寸一致(矮内容补白, 超出自然撑开) */
+    min-height: {{ body_min_height }};
     display: flex;
     flex-direction: column;
 }
@@ -1370,6 +1380,7 @@ MOTD_HTML_TEMPLATE = _MOTD_TEMPLATE_SRC.replace("__DIRT_TILE__", _DIRT_TILE)
 # ============================================================
 
 _PROXY_TEMPLATE_SRC = '''
+<!-- astrbot-t2i-shiki-runtime: 同主卡片, 携带标记 ID 跳过 1.2MB Shiki 运行时注入, 减小上传体积 -->
 <meta name="viewport" content="width=1280; height=1">
 <style>
 @import url('https://cdn.jsdelivr.net/npm/@fontsource/press-start-2p@5/index.min.css');
@@ -1394,8 +1405,8 @@ body {
     background-image: url("__DIRT_TILE__");
     background-size: 96px 96px;
     image-rendering: pixelated;
-    /* 弹性拉伸: 视口多高 body 就撑多高(内容自适应卡在矮内容时也能充满图片) */
-    min-height: 100vh;
+    /* 卡片高度: 同主模板, 由 body_min_height 控制(auto=100vh 自适应 / fixed=固定高度) */
+    min-height: {{ body_min_height }};
     display: flex;
     flex-direction: column;
 }
@@ -1830,15 +1841,21 @@ body {
 PROXY_HTML_TEMPLATE = _PROXY_TEMPLATE_SRC.replace("__DIRT_TILE__", _DIRT_TILE)
 
 
-@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "2.2.0")
+@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "2.3.0")
 class MOTDPlugin(Star):
     """MOTD 查询插件主类"""
+
+    # 配置缺省兜底: 防止任何时序下 _base_card_context/_send_card_with_fallback 先于 _load_config 访问
+    output_mode = "image"
+    card_height_mode = "auto"
     
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
+        # 发送闸门: 串行化「渲染+发送」段, 群聊多人同时查询时不再叠加渲染/上传开销(渲染失败有文本回退, 不会永久占用)
+        self._send_semaphore = asyncio.Semaphore(1)
         self._load_config()
-        logger.info(f"[MOTD] 插件初始化完成，版本 2.2.0")
+        logger.info(f"[MOTD] 插件初始化完成，版本 2.3.0")
     
     def _load_config(self):
         """加载插件配置"""
@@ -1853,11 +1870,26 @@ class MOTDPlugin(Star):
         # 头像/图标预取与磁盘缓存
         self.prefetch_avatars = self.config.get("prefetch_avatars", True)
         self.avatar_cache_ttl = self.config.get("avatar_cache_ttl", AVATAR_TTL_HOURS_DEFAULT)
+        # 头像下载失败负缓存（分钟）: 钳位 0~1440, 0=关闭负缓存（每次查询都重试）
+        raw_neg = self.config.get("avatar_neg_cache_ttl")
+        if raw_neg is None:
+            raw_neg = NEG_CACHE_TTL_MINUTES_DEFAULT
+        try:
+            self.avatar_neg_cache_ttl = max(0, min(int(raw_neg), 24 * 60))
+        except (TypeError, ValueError):
+            self.avatar_neg_cache_ttl = NEG_CACHE_TTL_MINUTES_DEFAULT
 
         # 卡片显示配置
         self.show_player_list = self.config.get("show_player_list", True)
         self.show_server_icon = self.config.get("show_server_icon", True)
         self.show_latency = self.config.get("show_latency", True)
+
+        # 输出模式: image=渲染像素风图片卡片; text=纯文本(跳过渲染与头像预取, 几乎零开销, 适合 1核1G 低配设备)
+        self.output_mode = self.config.get("output_mode", "image")
+
+        # 卡片高度模式: auto=高度贴内容自适应(v2.3.0 起云端视口 height=1 真正生效后的行为);
+        # fixed=固定高度(矮内容补白, 观感与 v2.2.0 及以前一致, 不依赖云端视口默认值, 显式 CSS 兜底)
+        self.card_height_mode = self.config.get("card_height_mode", "auto")
 
         # 代理服务器查询配置
         self.query_type = self.config.get("query_type", "normal")
@@ -2107,6 +2139,9 @@ class MOTDPlugin(Star):
             "show_player_list": self.show_player_list,
             "show_server_icon": self.show_server_icon,
             "show_latency": self.show_latency,
+            # 卡片高度: auto→100vh(云端视口 height=1 生效, 高度贴内容); fixed→720px 显式固定
+            # (固定值不依赖云端视口默认值; 矮内容补白, 超出自然撑开, 与 v2.2.0 及以前观感一致)
+            "body_min_height": "720px" if self.card_height_mode == "fixed" else "100vh",
         }
 
     @staticmethod
@@ -2179,15 +2214,28 @@ class MOTDPlugin(Star):
     async def _send_card_with_fallback(self, event: AstrMessageEvent, template: str,
                                        context: Dict[str, Any], build_text) -> bool:
         """统一降级发送层：
-        1. 渲染模板并发送图片；
+        0. output_mode == "text"（低配设备）→ 跳过渲染，直接发文本；
+        1. 渲染模板并发送图片（发送闸门串行 + 60 秒渲染超时，云端渲染不可达时不再无限等待）；
         2. 失败 → 发送文本回退（Unicode emoji，强制 content 纯文本通道）；
         3. 仍失败 → 仅记日志，不抛出（绝不阻塞主流程）。
         build_text: callable(context) -> str，构建回退文本
         """
+        if self.output_mode == "text":
+            try:
+                await event.send(self._plain_chain(event, build_text(context)))
+                return True
+            except Exception as e:
+                logger.error(f"[MOTD] 文本发送失败（放弃）: {e}")
+            return False
         try:
-            # type=png: 官方 t2i 服务默认 jpeg q40 会涂抹像素风细节; PNG 无损(服务端会忽略 png 的 quality)
-            url = await self.html_render(template, context, options={"full_page": True, "type": "png"})
-            await event.send(event.image_result(url))
+            async with self._send_semaphore:
+                # type=png: 官方 t2i 服务默认 jpeg q40 会涂抹像素风细节; PNG 无损(服务端会忽略 png 的 quality)
+                # 60s 超时: AstrBot 云端渲染的 POST 无超时, 云端拥堵/不可达时最长可挂数分钟, 这里兜底回退文本, 也避免长时间占住发送闸门
+                url = await asyncio.wait_for(
+                    self.html_render(template, context, options={"full_page": True, "type": "png"}),
+                    timeout=60,
+                )
+                await event.send(event.image_result(url))
             return True
         except Exception as e:
             logger.error(f"[MOTD] 图片渲染/发送失败，回退到文本: {e}")
@@ -2238,7 +2286,10 @@ class MOTDPlugin(Star):
             players_info = result.get("players", {})
             description = result.get("description", "无描述")
 
-            logger.info(f"[MOTD] Java 版原始数据: version={version_info}, players={players_info}")
+            # 弱机友好: 人数多的服务器样例可能极长, 只记前 8 个, 避免格式化超大字符串白白消耗 CPU/日志体积
+            _sample_preview = (players_info.get("sample") or [])[:8]
+            logger.info(f"[MOTD] Java 版原始数据: version={version_info}, "
+                        f"players={players_info.get('online', 0)}/{players_info.get('max', 0)}, 样例(前8)={_sample_preview}")
 
             server_version, client_version, via_hint = self._parse_version(version_info)
             motd_html = self._motd_to_html(description, max_length=100)
@@ -2355,11 +2406,22 @@ class MOTDPlugin(Star):
                     timeout=self.query_timeout + 5
                 )
             else:
+                # 基岩版为同步 socket, 移入线程执行: 超时等待期间不再阻塞事件循环(单核弱机上尤为明显)
                 result = await asyncio.wait_for(
-                    query_bedrock_server(server, port, self.query_timeout),
+                    asyncio.to_thread(query_bedrock_server, server, port, self.query_timeout),
                     timeout=self.query_timeout + 5
                 )
-            logger.info(f"[MOTD] 查询完成，结果: {result}")
+            # 弱机友好: 只记关键字段, 不再格式化完整查询结果(样例可极长且含 base64 图标)
+            if "error" in result:
+                logger.info(f"[MOTD] 查询完成(失败): {result.get('error')}")
+            else:
+                _ver = result.get("version")
+                _ver_name = _ver.get("name", "?") if isinstance(_ver, dict) else (_ver or "?")
+                _players = result.get("players") if isinstance(result.get("players"), dict) else {}
+                _online = _players.get("online", result.get("online_players", "?"))
+                _max_p = _players.get("max", result.get("max_players", "?"))
+                logger.info(f"[MOTD] 查询完成: source={result.get('source')}, 版本={_ver_name}, "
+                            f"玩家={_online}/{_max_p}, 图标={'有' if result.get('icon') else '无'}, 耗时={result.get('latency_ms')}ms")
         except asyncio.TimeoutError:
             logger.error("[MOTD] 查询超时")
             result = {"error": "查询超时，服务器响应时间过长"}
@@ -2371,10 +2433,10 @@ class MOTDPlugin(Star):
         # 避免渲染服务器的浏览器临时拉取 mc-heads 失败/限流导致头像缺失
         avatar_map: Dict[str, str] = {}
         if (self.prefetch_avatars and self.show_player_list and is_java
-                and "error" not in result):
+                and self.output_mode == "image" and "error" not in result):
             try:
                 _sample = result.get("players", {}).get("sample", []) or []
-                avatar_map = await get_player_avatars(_sample[:8], self.avatar_cache_ttl)
+                avatar_map = await get_player_avatars(_sample[:8], self.avatar_cache_ttl, self.avatar_neg_cache_ttl)
                 logger.info(f"[MOTD] 头像预取完成: {len(avatar_map)}/{min(len(_sample), 8)} 个")
             except Exception as e:
                 logger.warning(f"[MOTD] 玩家头像预取失败（不影响查询结果）: {e}")
@@ -2767,8 +2829,10 @@ class MOTDPlugin(Star):
                 f"💬 生效范围: {sessions}\n"
                 f"🔒 仅管理员配置: {'是' if self.admin_only_config else '否'}\n"
                 f"⏱️ 查询超时: {self.query_timeout}秒\n"
+                f"📤 输出模式: {'图片卡片' if self.output_mode == 'image' else '纯文本(低配设备)'}\n"
+                f"📐 卡片高度: {'随内容自适应' if self.card_height_mode == 'auto' else '固定(720px)'}\n"
                 f"🌐 使用 API 竞速查询: {'是' if self.use_api else '否'}\n"
-                f"👤 头像预取: {'开启' if self.prefetch_avatars else '关闭'}(刷新周期 {self.avatar_cache_ttl} 小时)\n"
+                f"👤 头像预取: {'开启' if self.prefetch_avatars else '关闭'}(刷新周期 {self.avatar_cache_ttl} 小时, 失败负缓存 {'关闭' if self.avatar_neg_cache_ttl <= 0 else f'{self.avatar_neg_cache_ttl} 分钟'})\n"
                 f"🖼️ 图标缓存: 保留最后一次成功获取(/motdr 清空)"
             )
         
@@ -2785,7 +2849,7 @@ class MOTDPlugin(Star):
     async def on_astrbot_loaded(self):
         """Bot 初始化完成时"""
         logger.info("=" * 50)
-        logger.info("[MOTD] 插件已加载 v2.2.0")
+        logger.info("[MOTD] 插件已加载 v2.3.0")
         logger.info("[MOTD] 支持 ViaVersion/Velocity/BungeeCord 多版本兼容")
         logger.info(f"[MOTD] 默认服务器: {self.default_server}:{self.default_port if self.default_server else '未设置'}")
         logger.info(f"[MOTD] 查询类型: {self.query_type}")
@@ -2797,7 +2861,7 @@ class MOTDPlugin(Star):
                 logger.info(f"[MOTD] 子服列表: {self.sub_servers_config or '未配置'}")
         logger.info(f"[MOTD] 对所有会话生效: {self.enable_all_sessions}")
         logger.info(f"[MOTD] 使用 API 查询: {self.use_api}")
-        logger.info(f"[MOTD] 头像预取: {'开启' if self.prefetch_avatars else '关闭'}, 头像刷新周期 {self.avatar_cache_ttl} 小时, 图标缓存保留最后一次成功获取")
+        logger.info(f"[MOTD] 头像预取: {'开启' if self.prefetch_avatars else '关闭'}, 头像刷新周期 {self.avatar_cache_ttl} 小时, 下载失败负缓存 {'关闭' if self.avatar_neg_cache_ttl <= 0 else f'{self.avatar_neg_cache_ttl} 分钟'}, 图标缓存保留最后一次成功获取")
 
         logger.info("=" * 50)
 

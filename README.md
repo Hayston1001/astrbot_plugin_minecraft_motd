@@ -1,12 +1,12 @@
-<p align="center"><img src="./logo.png" width="96" alt="logo"></p>
+<p align="center"><img src="https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/logo.png" width="96" alt="logo"></p>
 
 # MC 服务器状态查询(AstrBot MOTD 查询插件)
 
 一个用于查询 Minecraft 服务器状态的 AstrBot 插件. 支持 Java 版和基岩版服务器, **兼容 ViaVersion 多版本服务器**, **支持 Velocity 代理子服查询**. 
 
-![插件输出图片效果预览图1](./assets/preview_java.png)
-![插件输出图片效果预览图2](./assets/preview_bedrock.png)
-![插件输出图片效果预览图3](./assets/preview_proxy.png)
+![插件输出图片效果预览图1](https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/assets/preview_java.png)
+![插件输出图片效果预览图2](https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/assets/preview_bedrock.png)
+![插件输出图片效果预览图3](https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/assets/preview_proxy.png)
 
 ## 功能特性
 
@@ -106,16 +106,17 @@
 | `proxy_query_method` | 代理查询方式 | `velostat` |
 | `velostat_api_url` | velostat API 地址 | `http://代理IP:8080` |
 | `sub_servers` | 子服地址列表 | `lobby:host:port,survival:host:port` |
-| `enable_all_sessions` | 对所有会话生效 | ✅ |
-| `use_api` | 使用 API 竞速查询(API 与直连并发, 谁先返回用谁) | ✅(更快) |
-| `show_server_icon` | 显示服务器图标 | ✅ |
-| `show_player_list` | 显示在线玩家列表 | ✅ |
-| `show_latency` | 显示查询延迟 | ✅ |
+| `enable_all_sessions` | 对所有会话生效 | true |
+| `use_api` | 使用 API 竞速查询(API 与直连并发, 谁先返回用谁) | true |
+| `output_mode` | 输出模式: `image` 渲染像素风图片卡片 / `text` 纯文本(跳过渲染与头像预取, 几乎零开销) | `image` |
+| `card_height_mode` | 卡片高度: `auto` 随内容自适应(紧凑无留白) / `fixed` 固定高度 720px(玩家少时补白, 尺寸统一) | `auto` |
+| `show_server_icon` | 显示服务器图标 | true |
+| `show_player_list` | 显示在线玩家列表 | true |
+| `show_latency` | 显示查询延迟 | true |
 | `query_timeout` | 查询超时时间 | `5` |
-| `prefetch_avatars` | 预取玩家头像并内嵌渲染图(带磁盘缓存) | ✅(头像更稳定) |
+| `prefetch_avatars` | 预取玩家头像并内嵌渲染图(带磁盘缓存) | true |
 | `avatar_cache_ttl` | 头像刷新周期(小时), 过期后尝试重新下载, 失败继续用旧缓存 | `12` |
-
-**配置完成后必须重启 AstrBot！**
+| `avatar_neg_cache_ttl` | 头像负缓存(分钟), 失败后该时长内不再重试下载; 0 为关闭; 混合登录的服务器应延长此时间 | `10` |
 
 ### 2. 配置文件方式
 
@@ -132,8 +133,11 @@
     "admin_only_config": true,
     "query_timeout": 5,
     "use_api": true,
+    "output_mode": "image",
+    "card_height_mode": "auto",
     "prefetch_avatars": true,
     "avatar_cache_ttl": 12,
+    "avatar_neg_cache_ttl": 10,
     "show_server_icon": true,
     "show_player_list": true,
     "show_latency": true
@@ -151,8 +155,11 @@
     "enable_all_sessions": true,
     "query_timeout": 5,
     "use_api": true,
+    "output_mode": "image",
+    "card_height_mode": "auto",
     "prefetch_avatars": true,
     "avatar_cache_ttl": 12,
+    "avatar_neg_cache_ttl": 10,
     "show_server_icon": true,
     "show_player_list": true,
     "show_latency": true
@@ -170,8 +177,11 @@
     "enable_all_sessions": true,
     "query_timeout": 5,
     "use_api": true,
+    "output_mode": "image",
+    "card_height_mode": "auto",
     "prefetch_avatars": true,
     "avatar_cache_ttl": 12,
+    "avatar_neg_cache_ttl": 10,
     "show_server_icon": true,
     "show_player_list": true,
     "show_latency": true
@@ -321,7 +331,7 @@
 [MOTD] 使用指定服务器: mc.example.com:25565
 [MOTD] 开始执行查询, 超时=5秒
 [MOTD] 查询完成, 结果: {...}                      # 原始查询结果
-[MOTD] 头像预取完成: 8/8 个                            # 预取的玩家头像数(命中缓存则瞬间完成)
+[MOTD] 头像预取完成: 4/4 个                            # 预取的玩家头像数(命中缓存则瞬间完成)
 [MOTD] 查询流程完成
 ```
 
