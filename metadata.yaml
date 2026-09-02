@@ -2,7 +2,7 @@ name: astrbot_plugin_minecraft_motd
 display_name: MC 服务器状态查询
 short_desc: Minecraft 服务器状态查询，像素风彩色卡片，支持基岩版与代理子服
 desc: Minecraft 服务器 MOTD 查询插件，像素风状态卡片，完整还原 § 彩色 MOTD，支持 Java/基岩版、ViaVersion 多版本兼容、Velocity 代理子服查询
-version: 2.1.0
+version: 2.1.1
 author: Hayston1001
 repo: https://github.com/Hayston1001/astrbot_plugin_minecraft_motd
 astrbot_version: ">=4.17.0"
