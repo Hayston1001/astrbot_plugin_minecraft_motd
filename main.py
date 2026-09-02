@@ -11,6 +11,7 @@ import re
 import random
 import os
 import base64
+import hashlib
 from pathlib import Path
 import asyncio
 from urllib.parse import quote
@@ -355,7 +356,7 @@ async def _close_http_session() -> None:
 # 下载失败继续使用旧缓存（文件永不因过期删除，仅 /motdr 手动清空）
 # ============================================================
 AVATAR_TTL_HOURS_DEFAULT = 12   # 玩家头像刷新周期（小时，可在配置中调整）
-_NEG_CACHE_TTL = 30 * 60        # 下载失败负缓存时长（内存，秒）：仅限制重试频率，不影响旧缓存展示
+_NEG_CACHE_TTL = 10 * 60        # 下载失败负缓存时长（内存，秒）：仅限制重试频率，不影响旧缓存展示
 _NEG_CACHE: Dict[str, float] = {}
 
 
@@ -435,6 +436,27 @@ def _avatar_cache_key(uuid: str, name: str) -> str:
     return f"n:{(name or '?').strip().lower()}"
 
 
+def _offline_uuid(name: str) -> str:
+    """离线模式玩家 UUID：等价 Java UUID.nameUUIDFromBytes("OfflinePlayer:" + name)
+
+    盗版服（离线模式）按玩家名 MD5 推导 UUID，Mojang 数据库中不存在对应档案，
+    头像源按 UUID 查询必然查无此人。
+    """
+    data = bytearray(hashlib.md5(("OfflinePlayer:" + name).encode("utf-8")).digest())
+    data[6] = (data[6] & 0x0F) | 0x30   # 版本位置 3
+    data[8] = (data[8] & 0x3F) | 0x80   # 变体位置 IETF RFC 4122
+    h = data.hex()
+    return f"{h[0:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
+
+
+def _is_offline_uuid(uuid: str, name: str) -> bool:
+    """判断服务器下发的 UUID 是否为离线模式推导 UUID（盗版服玩家标志）"""
+    norm = _normalize_uuid(uuid)
+    if not norm or not name or name == '?':
+        return False
+    return norm == _offline_uuid(name)
+
+
 def _avatar_source_urls(uuid: str, name: str) -> list:
     """头像下载源列表（按顺序回退）：UUID 优先，无 UUID 时用玩家名"""
     urls = []
@@ -469,6 +491,7 @@ async def get_player_avatars(players: list, ttl_hours: float = AVATAR_TTL_HOURS_
     TTL 语义（stale-while-revalidate）：TTL 仅作为刷新周期——
     - 缓存未过期：直接使用，不发起下载；
     - 已过期或无缓存：本次查询尝试重新下载；
+    - 离线模式 UUID（盗版服按名推导）：本地判定后完全跳过下载，渲染用占位块；
     - 下载失败/超时：有旧缓存则继续用旧缓存，从未成功获取过才用占位块；
     - 缓存文件永不因过期删除（仅 /motdr 手动清空）。
 
@@ -480,6 +503,7 @@ async def get_player_avatars(players: list, ttl_hours: float = AVATAR_TTL_HOURS_
 
     result: Dict[str, str] = {}
     todo: Dict[str, Tuple[str, str]] = {}  # key -> (uuid, name)
+    offline_names: list = []  # 本次检测到的离线模式玩家名（仅用于日志）
     now = time.time()
     for p in players:
         if not isinstance(p, dict):
@@ -500,7 +524,15 @@ async def get_player_avatars(players: list, ttl_hours: float = AVATAR_TTL_HOURS_
         # 无缓存或已过期：尝试刷新（负缓存仅限制重试频率，不影响旧缓存展示）
         if _NEG_CACHE.get(key, 0) + _NEG_CACHE_TTL > now:
             continue
+        if _is_offline_uuid(uuid, name):
+            # 离线模式 UUID（盗版服）：Mojang 库无此档案，UUID 头像源必然 404，
+            # 直接跳过下载（渲染时用占位块）；纯本地判定零网络成本，也不进负缓存
+            offline_names.append(name)
+            continue
         todo[key] = (uuid, name)
+
+    if offline_names:
+        logger.info(f"[MOTD] 检测到离线模式玩家（盗版服 UUID），跳过头像下载: {', '.join(offline_names)}")
 
     if not todo:
         return result
@@ -1798,7 +1830,7 @@ body {
 PROXY_HTML_TEMPLATE = _PROXY_TEMPLATE_SRC.replace("__DIRT_TILE__", _DIRT_TILE)
 
 
-@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "2.1.1")
+@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件，支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "2.2.0")
 class MOTDPlugin(Star):
     """MOTD 查询插件主类"""
     
@@ -1806,7 +1838,7 @@ class MOTDPlugin(Star):
         super().__init__(context)
         self.config = config
         self._load_config()
-        logger.info(f"[MOTD] 插件初始化完成，版本 2.1.1")
+        logger.info(f"[MOTD] 插件初始化完成，版本 2.2.0")
     
     def _load_config(self):
         """加载插件配置"""
@@ -2753,7 +2785,7 @@ class MOTDPlugin(Star):
     async def on_astrbot_loaded(self):
         """Bot 初始化完成时"""
         logger.info("=" * 50)
-        logger.info("[MOTD] 插件已加载 v2.1.1")
+        logger.info("[MOTD] 插件已加载 v2.2.0")
         logger.info("[MOTD] 支持 ViaVersion/Velocity/BungeeCord 多版本兼容")
         logger.info(f"[MOTD] 默认服务器: {self.default_server}:{self.default_port if self.default_server else '未设置'}")
         logger.info(f"[MOTD] 查询类型: {self.query_type}")
