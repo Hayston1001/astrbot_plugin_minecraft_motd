@@ -2173,11 +2173,32 @@ class MOTDPlugin(Star):
         session_id = event.unified_msg_origin
         return session_id in self.enabled_sessions
     
+    def _is_slash_message(self, event: AstrMessageEvent) -> bool:
+        """判断消息是否为斜杠指令消息(以 / 开头)
+
+        背景(审计 F011): AstrBot WakingCheckStage 会在唤醒时把 wake_prefix(默认 '/')从
+        event.message_str 中剥离, 因此斜杠处理器内用 message_str.startswith('/') 判断
+        永远为 False, 四个斜杠指令曾因此全部不可达。这里改为检查消息链首段原始文本
+        (首段不会被框架修改), 与 on_message 的跳过逻辑共用同一事实来源。
+        """
+        try:
+            message_chain = event.message_obj.message
+            if message_chain and len(message_chain) > 0:
+                first_seg = message_chain[0]
+                if hasattr(first_seg, 'text') and first_seg.text and first_seg.text.startswith('/'):
+                    return True
+        except Exception:
+            pass
+        return False
+
     def _parse_server_address(self, address: str, is_java: bool = True) -> tuple:
         """
         解析服务器地址和端口
         如果用户指定了地址但不带端口, 使用标准端口(Java 25565 / 基岩 19132)
         """
+        # 裸 IPv6(多个 ':' 且无方括号)不含端口信息, 整体视作 host(审计 F049/F058)
+        if ':' in address and address.count(':') > 1 and not address.lstrip().startswith('['):
+            return address.strip('[]'), (JAVA_DEFAULT_PORT if is_java else BEDROCK_DEFAULT_PORT)
         if ':' in address:
             host, port_str = address.rsplit(':', 1)
             try:
@@ -2930,14 +2951,15 @@ class MOTDPlugin(Star):
         message = event.message_str.strip()
         
         # 获取原始消息链, 检查第一个消息段
+        # 获取原始消息链, 检查第一个消息段(审计 F056: 裸 except 收窄为 Exception)
         try:
             message_chain = event.message_obj.message
             if message_chain and len(message_chain) > 0:
                 first_seg = message_chain[0]
                 # 如果第一个消息段是 Plain 且以 / 开头, 跳过(这是指令消息)
-                if hasattr(first_seg, 'text') and first_seg.text.startswith('/'):
+                if hasattr(first_seg, 'text') and first_seg.text and first_seg.text.startswith('/'):
                     return
-        except:
+        except Exception:
             pass
         
         # 简单文本检查：如果以 / 开头, 跳过
@@ -2949,13 +2971,15 @@ class MOTDPlugin(Star):
             return
         
         # 匹配 motd 指令模式
-        motd_pattern = r'^(motd)(?:-bedrock)?(?:\s+(.+))?$'
+        motd_pattern = r'^(motd)(-bedrock)?(?:\s+(.+))?$'
         match = re.match(motd_pattern, message, re.IGNORECASE)
         
         if match:
             logger.info(f"[MOTD] 匹配到 motd 指令: {message}")
-            is_bedrock = '-bedrock' in message.lower()
-            server = match.group(2).strip() if match.group(2) else ""
+            # 审计 F010: 只看指令 token 是否带 -bedrock, 不再检查整条消息子串,
+            # 避免地址里恰好含 '-bedrock' 的 Java 服被误路由到基岩 UDP 查询
+            is_bedrock = match.group(2) is not None
+            server = match.group(3).strip() if match.group(3) else ""
             
             await self._do_motd_query(event, server, is_java=not is_bedrock)
 
@@ -3064,6 +3088,11 @@ class MOTDPlugin(Star):
                 logger.info(f"[MOTD] 配置已保存: {server}:{port}")
             except Exception as e:
                 logger.error(f"[MOTD] 保存配置失败: {e}")
+                yield self._plain_chain(event,
+                    f"{self._emoji(event, 'fail')} 服务器可连接, 但配置写入失败, 未生效\n"
+                    f"错误: {e}"
+                )
+                return
             
             yield self._plain_chain(event,
                 f"{self._emoji(event, 'success')} 默认服务器设置成功\n"
