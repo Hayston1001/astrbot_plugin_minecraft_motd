@@ -60,9 +60,9 @@
         "default": true
     },
     "query_timeout": {
-        "description": "查询超时时间(秒)",
+        "description": "查询总超时时间(秒)",
         "type": "int",
-        "hint": "查询服务器时的超时时间, 建议 5-10 秒",
+        "hint": "建议 5~10",
         "default": 5
     },
     "use_api": {
