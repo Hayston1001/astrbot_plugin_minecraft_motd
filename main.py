@@ -368,6 +368,8 @@ def _safe_uuid(value) -> str:
 
 
 def _get_http_session() -> aiohttp.ClientSession:
+    # 审计 F034: terminate() 后若仍有在途查询调用本函数, 会重建新会话——这是有意的
+    # 自愈语义(重载/重启用), 旧查询拿到新会话正常工作, 不视为泄漏; 会话由下次 terminate 统一释放。
     """获取全局共享的 aiohttp 会话(懒加载, 由插件 terminate() 释放)"""
     global _HTTP_SESSION
     if _HTTP_SESSION is None or _HTTP_SESSION.closed:
@@ -725,6 +727,8 @@ async def query_java_server_api(host: str, port: int = JAVA_DEFAULT_PORT, *, tim
 # 正/负结果均缓存(TTL 取 DNS 应答值, 夹在 60~3600 秒, 负结果固定 300 秒), 
 # 查询失败时沿用已过期的旧缓存(TTL 仅作刷新周期, 与头像缓存哲学一致). 
 # ============================================================
+# 审计 F016: 直连状态响应 JSON 字节数上限(带 favicon 的真实响应通常 < 64KB)
+STATUS_JSON_MAX_BYTES = 128 * 1024
 SRV_LOOKUP_TIMEOUT = 1.5   # 单个 DNS 解析器的 UDP 超时(秒, 多解析器并发竞速取最快者)
 SRV_NEG_TTL_SECONDS = 300  # 无 SRV 记录(负结果)的缓存时长(秒)
 _SRV_CACHE: Dict[str, Tuple[Optional[str], int, float]] = {}  # host -> (target 或 None, port, 过期时间戳)
@@ -865,25 +869,29 @@ async def _resolve_minecraft_srv(host: str) -> Optional[Tuple[str, int]]:
     srv: Optional[Tuple[str, int]] = None
     ttl = SRV_NEG_TTL_SECONDS
     definitive = False
-    while pending and not definitive:
-        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-        for task in done:
-            try:
-                rcode, records, rec_ttl = task.result()
-            except Exception as e:                 # 单个解析器超时/不可达, 竞速等待其余解析器
-                logger.info(f"[MOTD] SRV 查询解析器 {task_resolver[task]} 失败: {e}")
-                continue
-            if rcode not in (0, 3):                # SERVFAIL 等不算明确答案, 竞速等待其余解析器
-                continue
-            definitive = True
-            ttl = rec_ttl
-            if rcode == 0 and records:
-                priority, weight, port, target = sorted(records, key=lambda rec: (rec[0], -rec[1]))[0]
-                target = target.rstrip(".").lower()
-                if target and port > 0:
-                    srv = (target, port)
-            break
-    for task in pending:
+    # 审计 F015: 外层协程被取消时, finally 保证全部解析器任务被回收, 不留孤儿任务
+    try:
+        while pending and not definitive:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                try:
+                    rcode, records, rec_ttl = task.result()
+                except Exception as e:                 # 单个解析器超时/不可达, 竞速等待其余解析器
+                    logger.info(f"[MOTD] SRV 查询解析器 {task_resolver[task]} 失败: {e}")
+                    continue
+                if rcode not in (0, 3):                # SERVFAIL 等不算明确答案, 竞速等待其余解析器
+                    continue
+                definitive = True
+                ttl = rec_ttl
+                if rcode == 0 and records:
+                    priority, weight, port, target = sorted(records, key=lambda rec: (rec[0], -rec[1]))[0]
+                    target = target.rstrip(".").lower()
+                    if target and port > 0:
+                        srv = (target, port)
+                break
+    finally:
+        for task in pending:
+            task.cancel()
         task.cancel()
 
     if not definitive:
@@ -959,12 +967,21 @@ async def query_java_server_direct(host: str, port: int = JAVA_DEFAULT_PORT, tim
             # 读取 JSON 长度
             json_length = await _unpack_varint(reader)
 
+            # 审计 F016: 上限校验, 防恶意服务器在超时窗口内用超大声明撑爆内存
+            if json_length > STATUS_JSON_MAX_BYTES:
+                raise ValueError(f"状态响应过大({json_length} 字节), 已拒绝")
+
             # 读取 JSON 数据
             json_data = await reader.readexactly(json_length)
 
             return json.loads(json_data.decode('utf-8'))
         finally:
             writer.close()
+            # 审计 F043: 确保 TLS/传输缓冲释放完整(半关闭异常无害)
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
 
     try:
         _t0 = time.perf_counter()
@@ -974,7 +991,15 @@ async def query_java_server_direct(host: str, port: int = JAVA_DEFAULT_PORT, tim
             data["icon"] = data.get("icon") or data.get("favicon")
             data["latency_ms"] = round((time.perf_counter() - _t0) * 1000)
             data["source"] = "direct"
-        return data
+            # 审计 F018: version/players 必须是 dict, 畸形形状归一为空 dict,
+            # 避免下游 _format_response/_parse_version 在 try 外崩溃
+            if not isinstance(data.get("version"), dict):
+                data["version"] = {}
+            if not isinstance(data.get("players"), dict):
+                data["players"] = {}
+            return data
+        # 服务器返回了合法 JSON 但不是对象(如数组/字符串), 无法作为状态解析
+        return {"error": "状态响应格式异常(非 JSON 对象)"}
     except asyncio.TimeoutError:
         return {"error": "连接超时, 请检查服务器地址和端口是否正确"}
     except socket.gaierror:
@@ -1015,45 +1040,51 @@ async def query_java_server(host: str, port: int = JAVA_DEFAULT_PORT, timeout: i
     direct_task = asyncio.create_task(query_java_server_direct(host, port, timeout))
     pending = {api_task, direct_task}
 
-    while pending:
-        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-        for task in done:
-            # 两个查询函数内部均捕获异常并返回 {"error": ...}, task.result() 不会抛出
-            result = task.result()
-            if "error" in result:
-                logger.info(f"[MOTD] 竞速查询一支失败({result.get('error')}), 等待另一支")
-                continue
-            if task is direct_task:
-                # 直连成功
-                proto = result.get("version", {}).get("protocol", 0)
-                version_name = result.get("version", {}).get("name", "")
-                logger.info(f"[MOTD] 直连查询获胜: protocol={proto}, name='{version_name}'")
-                if proto is not None and proto <= 0:
-                    # 代理服务器：等待竞速中的 API 任务补全版本范围(至多到统一死线, 到点放弃补全)
-                    logger.info(f"[MOTD] 直连协议号 {proto} ≤ 0, 等待 API 任务补全版本范围(至多到统一死线)")
-                    remaining = deadline - loop.time()
-                    api_done, _api_pending = set(), {api_task}
-                    if remaining > 0:
-                        api_done, _api_pending = await asyncio.wait({api_task}, timeout=remaining)
-                    if api_task in api_done:
-                        api_result = api_task.result()
-                        if "error" not in api_result:
-                            api_name = api_result.get("version", {}).get("name", "")
-                            if api_name and api_name != version_name:
-                                result["version"]["name"] = api_name
-                                logger.info(f"[MOTD] API 补全版本名: '{version_name}' -> '{api_name}'")
+    # 审计 F017: 外层协程被取消(如插件 terminate/会话中止)时, 两支子任务必须回收
+    try:
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                # 两个查询函数内部均捕获异常并返回 {"error": ...}, task.result() 不会抛出
+                result = task.result()
+                if "error" in result:
+                    logger.info(f"[MOTD] 竞速查询一支失败({result.get('error')}), 等待另一支")
+                    continue
+                if task is direct_task:
+                    # 直连成功
+                    proto = result.get("version", {}).get("protocol", 0)
+                    version_name = result.get("version", {}).get("name", "")
+                    logger.info(f"[MOTD] 直连查询获胜: protocol={proto}, name='{version_name}'")
+                    if proto is not None and proto <= 0:
+                        # 代理服务器：等待竞速中的 API 任务补全版本范围(至多到统一死线, 到点放弃补全)
+                        logger.info(f"[MOTD] 直连协议号 {proto} ≤ 0, 等待 API 任务补全版本范围(至多到统一死线)")
+                        remaining = deadline - loop.time()
+                        api_done, _api_pending = set(), {api_task}
+                        if remaining > 0:
+                            api_done, _api_pending = await asyncio.wait({api_task}, timeout=remaining)
+                        if api_task in api_done:
+                            api_result = api_task.result()
+                            if "error" not in api_result:
+                                api_name = api_result.get("version", {}).get("name", "")
+                                if api_name and api_name != version_name:
+                                    result["version"]["name"] = api_name
+                                    logger.info(f"[MOTD] API 补全版本名: '{version_name}' -> '{api_name}'")
+                                else:
+                                    logger.info(f"[MOTD] API 版本名相同或为空, 无需补全")
                             else:
-                                logger.info(f"[MOTD] API 版本名相同或为空, 无需补全")
+                                logger.info(f"[MOTD] API 支未能提供版本名({api_result.get('error')}), 保留直连结果")
                         else:
-                            logger.info(f"[MOTD] API 支未能提供版本名({api_result.get('error')}), 保留直连结果")
-                    else:
-                        logger.info(f"[MOTD] 统一死线已到, 放弃等待 API 补全版本名, 保留直连结果")
-                api_task.cancel()  # 补全等待已结束: 已完成时为 no-op, 仍在飞则中止
+                            logger.info(f"[MOTD] 统一死线已到, 放弃等待 API 补全版本名, 保留直连结果")
+                    api_task.cancel()  # 补全等待已结束: 已完成时为 no-op, 仍在飞则中止
+                    return _stamp(result)
+                # API 先成功：取消直连任务, 直接采用(直连通常更快, 能被 API 抢先说明直连不可达)
+                direct_task.cancel()
+                logger.info(f"[MOTD] API 查询获胜({result.get('latency_ms')}ms)")
                 return _stamp(result)
-            # API 先成功：取消直连任务, 直接采用(直连通常更快, 能被 API 抢先说明直连不可达)
-            direct_task.cancel()
-            logger.info(f"[MOTD] API 查询获胜({result.get('latency_ms')}ms)")
-            return _stamp(result)
+    except asyncio.CancelledError:
+        api_task.cancel()
+        direct_task.cancel()
+        raise
 
     # 两支都失败：返回直连的错误信息
     return direct_task.result()
@@ -2270,6 +2301,9 @@ class MOTDPlugin(Star):
         解析版本信息, 支持 ViaVersion/Velocity/BungeeCord 等多版本兼容模式
         返回: (服务器版本, 支持的客户端版本, 代理/多版本提示)
         """
+        # 审计 F022: mcstatus.io 可能返回 version=null, 防御非 dict 输入
+        if not isinstance(version_info, dict):
+            version_info = {}
         version_name = (version_info.get("name") or "").strip()
 
         # 确保 protocol 是整数
