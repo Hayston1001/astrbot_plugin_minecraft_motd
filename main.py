@@ -816,7 +816,10 @@ def _srv_query_sync(host: str, resolver: str, timeout: float) -> Tuple[int, List
             if remain <= 0:
                 raise socket.timeout("SRV 查询超时")
             sock.settimeout(remain)
-            data, _addr = sock.recvfrom(4096)
+            data, resp_addr = sock.recvfrom(4096)
+            # 审计 F040: 只接受所查询解析器 :53 的应答, 丢弃任意来源的伪造应答
+            if resp_addr[0] != resolver or resp_addr[1] != 53:
+                continue
             if len(data) < 12:
                 continue
             rid, flags, qdcount, ancount, _ns, _ar = struct.unpack(">HHHHHH", data[:12])
@@ -861,6 +864,8 @@ async def _resolve_minecraft_srv(host: str) -> Optional[Tuple[str, int]]:
         return (cached[0], cached[1]) if cached[0] else None       # 缓存命中(含负缓存)
     stale = (cached[0], cached[1]) if cached and cached[0] else None
 
+    # 审计 F042: 多解析器并发经默认线程池执行, 峰值占用 5 线程 × 至多 1.5s;
+    # 窗口短且受控, 不引入专用线程池(避免额外复杂度)
     task_resolver = {}
     for r in _get_srv_resolvers():
         t = asyncio.create_task(asyncio.to_thread(_srv_query_sync, host, r, SRV_LOOKUP_TIMEOUT))
@@ -1116,6 +1121,9 @@ def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, timeout: i
 
         # 接收响应
         data, addr = sock.recvfrom(2048)
+        # 审计 F040: 只接受目标主机的应答, 丢弃局域网内其它主机的伪造应答
+        if addr[0] != socket.gethostbyname(host):
+            raise OSError("收到非目标主机的 UDP 应答, 已丢弃")
         _latency_ms = round((time.perf_counter() - _t0) * 1000)
 
         # 解析响应
@@ -1178,17 +1186,22 @@ def parse_sub_servers_config(config_str: str) -> list:
             name, host, port_str = parts
             try:
                 port = int(port_str)
+                # 审计 F047: 端口范围与非空字段校验
+                if not (1 <= port <= 65535) or not name.strip() or not host.strip():
+                    raise ValueError("端口越界或名称/地址为空")
                 servers.append({"name": name.strip(), "host": host.strip(), "port": port})
-            except ValueError:
-                logger.warning(f"[MOTD] 子服配置解析失败, 端口不是数字: {item}")
+            except ValueError as e:
+                logger.warning(f"[MOTD] 子服配置解析失败: {item} ({e})")
         elif len(parts) == 2:
             # 没有服务器名, 用 host:port 作为名称
             host, port_str = parts
             try:
                 port = int(port_str)
+                if not (1 <= port <= 65535) or not host.strip():
+                    raise ValueError("端口越界或地址为空")
                 servers.append({"name": f"{host}:{port}", "host": host.strip(), "port": port})
-            except ValueError:
-                logger.warning(f"[MOTD] 子服配置解析失败, 端口不是数字: {item}")
+            except ValueError as e:
+                logger.warning(f"[MOTD] 子服配置解析失败: {item} ({e})")
         else:
             logger.warning(f"[MOTD] 子服配置格式错误: {item}")
 
@@ -1209,7 +1222,12 @@ async def query_velostat_servers(api_url: str, *, timeout: float) -> Dict[str, A
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    return {"servers": data, "error": None}
+                    # 审计 F019: 响应必须是 {子服名: {状态...}} 形状, 非 dict 顶层
+                    # 或非 dict 子项一律剔除, 防畸形响应在下游格式化崩溃
+                    if not isinstance(data, dict):
+                        return {"servers": {}, "error": "velostat 响应格式异常(非 JSON 对象)"}
+                    servers = {k: v for k, v in data.items() if isinstance(v, dict)}
+                    return {"servers": servers, "error": None}
                 else:
                     return {"servers": {}, "error": f"velostat API 请求失败: HTTP {resp.status}"}
     except asyncio.TimeoutError:
@@ -2567,7 +2585,9 @@ class MOTDPlugin(Star):
         """
         if self.output_mode == "text":
             try:
-                await event.send(self._plain_chain(event, build_text(context)))
+                # 审计 F023: 发送通道 30s 兜底(与渲染 60s 同族例外), 防挂起
+                await asyncio.wait_for(
+                    event.send(self._plain_chain(event, build_text(context))), timeout=30)
                 return True
             except Exception as e:
                 logger.error(f"[MOTD] 文本发送失败(放弃): {e}")
@@ -2580,13 +2600,16 @@ class MOTDPlugin(Star):
                     self.html_render(template, context, options={"full_page": True, "type": "png"}),
                     timeout=60,
                 )
-                await event.send(event.image_result(url))
+                # 审计 F023: 图片发送 30s 兜底 —— 发送位于 _send_semaphore 闸门内,
+                # 通道挂起时会永久占住闸门导致全插件卡片发送瘫痪
+                await asyncio.wait_for(event.send(event.image_result(url)), timeout=30)
             return True
         except Exception as e:
             logger.error(f"[MOTD] 图片渲染/发送失败, 回退到文本: {e}")
         text = build_text(context)
         try:
-            await event.send(self._plain_chain(event, text))
+            await asyncio.wait_for(
+                event.send(self._plain_chain(event, text)), timeout=30)
             return True
         except Exception as e:
             logger.error(f"[MOTD] 文本回退发送失败(放弃): {e}")
