@@ -1028,48 +1028,72 @@ async def query_java_server(host: str, port: int = JAVA_DEFAULT_PORT, timeout: i
     return direct_task.result()
 
 
-async def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, timeout: int = 5) -> Dict[str, Any]:
-    """异步查询基岩版服务器状态"""
+def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, timeout: int = 5) -> Dict[str, Any]:
+    """同步查询基岩版服务器状态(Unconnected Ping)
+
+    注意: 本函数为同步 socket 实现, 调用方必须经 asyncio.to_thread 移入线程执行,
+    直接在事件循环中调用会阻塞事件循环(v2.3.0 曾误标 async def, 导致 to_thread
+    只创建协程不执行, 基岩查询 100% 失败 —— 审计 F009)。
+    """
+    sock = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(timeout)
         _t0 = time.perf_counter()
-        
-        # 发送 Unconnected Ping
-        ping_data = b'\x01' + struct.pack('>Q', int(time.time() * 1000)) + b'\x00\x00\x00\x00\x00\x00\x00\x00'
+
+        # 发送 Unconnected Ping(RakNet 规范: ID(1B) + 时间(8B) + MAGIC(16B) + 客户端 GUID(8B))
+        # MAGIC 为规范常量, 缺失会被校验 MAGIC 的主流 BDS 系服务器静默丢弃(审计 F004)
+        _RAKNET_MAGIC = b'\x00\xff\xff\x00\xfe\xfe\xfe\xfe\xfd\xfd\xfd\xfd\x12\x34\x56\x78'
+        ping_data = (
+            b'\x01'
+            + struct.pack('>Q', int(time.time() * 1000))
+            + _RAKNET_MAGIC
+            + struct.pack('>Q', 0)  # 客户端 GUID, 无状态查询用固定占位值
+        )
         sock.sendto(ping_data, (host, port))
-        
+
         # 接收响应
         data, addr = sock.recvfrom(2048)
-        sock.close()
         _latency_ms = round((time.perf_counter() - _t0) * 1000)
-        
+
         # 解析响应
         if len(data) < 35:
             return {"error": "响应数据无效"}
-        
+
         # 跳过头部
         server_info = data[35:].decode('utf-8', errors='ignore').split(';')
-        
+
         if len(server_info) >= 6:
+            def _to_int(value, default=0):
+                # RakNet 状态串按 ';' 切分后全是 str, 上游格式化需要 int(审计 F008)
+                try:
+                    return int(str(value).strip())
+                except (ValueError, TypeError):
+                    return default
             return {
                 "edition": server_info[0],
                 "motd": server_info[1],
-                "protocol": server_info[2],
+                "protocol": _to_int(server_info[2], 0),
                 "version": server_info[3],
-                "online_players": server_info[4],
-                "max_players": server_info[5],
+                "online_players": _to_int(server_info[4]),
+                "max_players": _to_int(server_info[5]),
                 "server_id": server_info[6] if len(server_info) > 6 else "未知",
                 "latency_ms": _latency_ms,
                 "source": "bedrock_udp",
             }
         else:
             return {"error": "无法解析服务器响应"}
-            
+
     except socket.timeout:
         return {"error": "连接超时, 请检查服务器地址和端口是否正确"}
     except Exception as e:
         return {"error": f"查询失败: {str(e)}"}
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 def parse_sub_servers_config(config_str: str) -> list:
@@ -2563,8 +2587,15 @@ class MOTDPlugin(Star):
         else:
             motd_html = self._motd_to_html(result.get("motd", "无描述"), max_length=100)
             server_version = result.get("version", "未知")
-            online = result.get("online_players", 0)
-            max_players = result.get("max_players", 0)
+            # 防御: 上游理论上有 str 人数的可能(审计 F008, 现已在 query 层归一, 此处兜底)
+            try:
+                online = int(result.get("online_players", 0))
+            except (TypeError, ValueError):
+                online = 0
+            try:
+                max_players = int(result.get("max_players", 0))
+            except (TypeError, ValueError):
+                max_players = 0
 
             logger.info(f"[MOTD] 基岩版原始数据: {result}")
             logger.info(f"[MOTD] 基岩版格式化结果: version='{server_version}', players={online}/{max_players}")
