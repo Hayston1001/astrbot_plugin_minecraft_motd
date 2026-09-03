@@ -32,7 +32,7 @@ BEDROCK_DEFAULT_PORT = 19132
 # ============================================================
 # 协议号 → 版本名 完整映射(2026-06 更新)
 # 格式: protocol: (显示版本, 主版本号)
-# 注: 26.x 起 Minecraft 采用年份.版本的新命名规则
+# 注: 26.x 起 Minecraft 采用按年份启用的新大版本序号(26.1/26.2/…), 比较语义同普通数字版本
 # ============================================================
 PROTOCOL_VERSION_MAP: Dict[int, Tuple[str, str]] = {
     4:    ("1.7.2-1.7.5", "1.7"),
@@ -258,10 +258,46 @@ def _render_motd_segments(segments: list) -> str:
     return ''.join(html)
 
 # 版本号正则(匹配 1.x.y 或 1.x)
-_VERSION_RE = re.compile(r'(\d+\.\d+(?:\.\d+)?)')
+# 审计 F003: 版本 token 源 —— 小数位允许为 'x'(BungeeCord '1.8.x-26.x' 的 '26.x' 点后无数字)
+_VERSION_TOKEN_SRC = r'\d+\.(?:\d+(?:\.\d+)?|x)'
+_VERSION_RE = re.compile(r'(' + _VERSION_TOKEN_SRC + r')')
 
 # 版本名 → 协议号 反向查找表(从 PROTOCOL_VERSION_MAP 构建)
 _VERSION_TO_PROTOCOL: Dict[str, int] = {}
+
+
+def _norm_ver_token(token: str) -> str:
+    """版本 token 规范化: 去掉 '.x' 通配尾段(审计 F003), 如 '1.8.x'->'1.8', '26.x'->'26'"""
+    t = (token or "").strip()
+    if t.endswith(".x"):
+        t = t[:-2]
+    return t
+
+
+def _ver_sort_key(v: str):
+    """版本排序键(容错非数字段, 审计 F003)"""
+    key = []
+    for part in str(v).split("."):
+        try:
+            key.append(int(part))
+        except ValueError:
+            key.append(0)
+    return key
+
+
+def _is_mc_version_token(token: str) -> bool:
+    """判断 token 是否像 Minecraft 版本号(1.x 系或 26.x 起新大版本系)"""
+    parts = _norm_ver_token(token).split(".")
+    try:
+        major = int(parts[0])
+    except (ValueError, IndexError):
+        return False
+    if major == 1 and len(parts) >= 2:
+        try:
+            return 0 <= int(parts[1])
+        except ValueError:
+            return False
+    return major >= 26
 
 
 def _build_version_to_protocol():
@@ -276,8 +312,12 @@ def _build_version_to_protocol():
         if not start_m or not end_m:
             continue
 
-        start_parts = [int(x) for x in start_m.group(1).split(".")]
-        end_parts = [int(x) for x in end_m.group(1).split(".")]
+        # 审计 F003: 先剥离 '.x' 通配尾段再转 int(映射表中存在 '26.x' 类显示名)
+        try:
+            start_parts = [int(x) for x in _norm_ver_token(start_m.group(1)).split(".")]
+            end_parts = [int(x) for x in _norm_ver_token(end_m.group(1)).split(".")]
+        except ValueError:
+            continue
 
         # 补齐到三段
         while len(start_parts) < 3:
@@ -306,11 +346,17 @@ def _lookup_protocol_from_name(version_name: str) -> Optional[int]:
     """从版本名中提取最高版本号, 反查协议号. 未找到返回 None. """
     if not version_name:
         return None
-    matches = _VERSION_RE.findall(version_name)
+    # 审计 F033: 整串精确匹配优先(如 "1.21.4" 直接命中), 避免被截断子串带偏
+    direct = _VERSION_TO_PROTOCOL.get(_norm_ver_token(version_name.strip()))
+    if direct is not None:
+        return direct
+    matches = [_norm_ver_token(v) for v in _VERSION_RE.findall(version_name)]
+    # 审计 F033: 只保留像 MC 版本号的 token(排除代理软件自身版本号如 Velocity 3.4.0)
+    matches = [v for v in matches if _is_mc_version_token(v)]
     if not matches:
         return None
     # 取最高版本号
-    best = max(matches, key=lambda v: [int(x) for x in v.split(".") if x.isdigit()])
+    best = max(matches, key=_ver_sort_key)
     # 先精确查找, 再尝试补齐到三段查找(如 1.8 → 1.8.0)
     result = _VERSION_TO_PROTOCOL.get(best)
     if result is not None:
@@ -1098,6 +1144,8 @@ async def query_java_server(host: str, port: int = JAVA_DEFAULT_PORT, timeout: i
                     logger.info(f"[MOTD] 直连查询获胜: protocol={proto}, name='{version_name}'")
                     if proto is not None and proto <= 0:
                         # 代理服务器：等待竞速中的 API 任务补全版本范围(至多到统一死线, 到点放弃补全)
+                    # 审计 F044: 现代 Velocity/BungeeCord 对未知协议返回最新协议号(>0),
+                    # 本分支仅服务 ViaVersion 屏蔽标记 -1 等极端场景, 保留兜底
                         logger.info(f"[MOTD] 直连协议号 {proto} ≤ 0, 等待 API 任务补全版本范围(至多到统一死线)")
                         remaining = deadline - loop.time()
                         api_done, _api_pending = set(), {api_task}
@@ -2327,26 +2375,24 @@ class MOTDPlugin(Star):
             port = JAVA_DEFAULT_PORT if is_java else BEDROCK_DEFAULT_PORT
         return host, port
     
-    def _format_motd(self, motd_data: Any) -> str:
-        """格式化 MOTD 文本"""
+    def _format_motd(self, motd_data: Any, _depth: int = 0) -> str:
+        """格式化 MOTD 文本(审计 F050: 递归展开嵌套 extra, 支持 translate 组件)"""
+        if _depth > 20:
+            return ""
         if isinstance(motd_data, str):
             return motd_data
         elif isinstance(motd_data, dict):
-            text = motd_data.get("text", "")
-            extra = motd_data.get("extra", [])
-            for item in extra:
-                if isinstance(item, dict):
-                    text += item.get("text", "")
-                elif isinstance(item, str):
-                    text += item
+            text = motd_data.get("text", "") or motd_data.get("fallback", "")
+            if not text and motd_data.get("translate"):
+                # translate 组件: 取 translate 键占位(无本地化环境下的合理降级)
+                text = str(motd_data.get("translate"))
+            for item in motd_data.get("extra", []) or []:
+                text += self._format_motd(item, _depth + 1)
             return text
         elif isinstance(motd_data, list):
             text = ""
             for item in motd_data:
-                if isinstance(item, dict):
-                    text += item.get("text", "")
-                elif isinstance(item, str):
-                    text += item
+                text += self._format_motd(item, _depth + 1)
             return text
         return str(motd_data)
     
@@ -2409,7 +2455,7 @@ class MOTDPlugin(Star):
 
         # 3b. 版本名包含范围格式(如 "1.7.2-1.21.11"、"1.8 - 26.1"、"1.8 / 1.21")
         if not is_multi_version and version_name:
-            range_match = re.search(r'(\d+\.\d+[\w.]*)\s*[-~–/]\s*(\d+\.\d+)', version_name)
+            range_match = re.search(r'(' + _VERSION_TOKEN_SRC + r')[\w.]*\s*[-~–/]\s*(' + _VERSION_TOKEN_SRC + r')', version_name)
             if range_match:
                 is_multi_version = True
                 detect_reason = f"范围格式: '{range_match.group(0)}'"
@@ -2437,29 +2483,41 @@ class MOTDPlugin(Star):
         if not is_multi_version:
             logger.info(f"[MOTD] 未检测到多版本/代理")
 
-        # ── 4. 从版本名解析支持范围 ──
+        # ── 4. 解析支持范围(来源一: 版本名; 来源二: ViaVersion supportedVersions 数组) ──
         min_supported_version = ""
         max_supported_version = ""
-        if is_multi_version and version_name:
-            all_versions = _VERSION_RE.findall(version_name)
-            # 过滤掉明显不是 Minecraft 版本的数字(如代理版本号 3.4.0)
-            mc_versions = []
-            for v in all_versions:
-                parts = v.split('.')
-                if len(parts) >= 2 and parts[0] == '1' and parts[1].isdigit():
-                    mc_versions.append(v)
-                elif len(parts) >= 2:
-                    # Minecraft 新版本命名(26.x 起改用年份.版本格式)
+        sv_hint_used = False
+        supported_raw = version_info.get("supportedVersions") if isinstance(version_info, dict) else None
+        has_supported = isinstance(supported_raw, list) and len(supported_raw) > 0
+        if is_multi_version or has_supported or version_name:
+            # 来源一: 版本名中的版本 token(审计 F003: '.x' 尾段规范化, '26' 单段大版本接受)
+            all_versions = [_norm_ver_token(v) for v in _VERSION_RE.findall(version_name)]
+            mc_versions = [v for v in all_versions if _is_mc_version_token(v)]
+            # 来源二: ViaVersion send-supported-versions=true 时上报的协议号数组
+            # (审计 F051: 之前 0 处消费; 官方字段, 值为协议号 int 列表)
+            sv_versions = []
+            if has_supported:
+                for proto_id in supported_raw:
                     try:
-                        major = int(parts[0])
-                        if major >= 26:
-                            mc_versions.append(v)
-                    except ValueError:
-                        pass
-            logger.info(f"[MOTD] 版本范围解析: all_versions={all_versions}, mc_versions={mc_versions}")
+                        display, major = PROTOCOL_VERSION_MAP.get(int(proto_id), ("", ""))
+                    except (TypeError, ValueError):
+                        continue
+                    if display:
+                        sv_versions.append(major or display)
+                if sv_versions and len(set(sv_versions)) >= 2 and not is_multi_version:
+                    is_multi_version = True
+                    detect_reason = f"ViaVersion supportedVersions 数组({len(sv_versions)} 个协议)"
+                    sv_hint_used = True
+                    logger.info(f"[MOTD] 多版本检测命中 supportedVersions: {sv_versions}")
+            mc_versions.extend(sv_versions)
+            logger.info(f"[MOTD] 版本范围解析: all_versions={all_versions}, sv={sv_versions}, mc_versions={mc_versions}")
             if mc_versions:
-                max_supported_version = max(mc_versions, key=lambda v: [int(x) for x in v.split('.') if x.isdigit()])
-                min_supported_version = min(mc_versions, key=lambda v: [int(x) for x in v.split('.') if x.isdigit()])
+                max_supported_version = max(mc_versions, key=_ver_sort_key)
+                min_supported_version = min(mc_versions, key=_ver_sort_key)
+                # 审计 F003: 协议号映射版本若比名称解析上界更新, 用映射值补全
+                # (BungeeCord '-1' 握手下 protocol=最新支持协议, 如 776 -> '26.2')
+                if proto_ver_display and _ver_sort_key(proto_ver_display) > _ver_sort_key(max_supported_version):
+                    max_supported_version = proto_ver_display
 
         # ── 5. 构建显示结果 ──
         if is_multi_version:
@@ -2485,7 +2543,9 @@ class MOTDPlugin(Star):
 
         # ── 6. 代理/多版本提示 ──
         if is_multi_version:
-            if proxy_name:
+            if sv_hint_used:
+                via_hint = "检测到: ViaVersion 兼容"
+            elif proxy_name:
                 via_hint = f"检测到: {proxy_name} 代理"
             else:
                 via_hint = "支持多版本客户端连接"
