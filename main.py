@@ -175,7 +175,7 @@ def _apply_section_code(state: dict, code: str) -> None:
         state[_MC_FORMAT_CODES[code]] = True
 
 
-def _parse_motd_segments(data, state: dict, out: list) -> None:
+def _parse_motd_segments(data, state: dict, out: list, depth: int = 0) -> None:
     """递归解析 MOTD 数据(§ 码字符串 / JSON 组件树 / 列表)为样式段列表
     JSON 组件树语义：子组件继承父组件样式, 自身字段可覆盖(显式 false 也覆盖)
     """
@@ -196,8 +196,9 @@ def _parse_motd_segments(data, state: dict, out: list) -> None:
         if isinstance(color, str):
             color_l = color.lower()
             resolved = MINECRAFT_COLOR_MAP.get(color_l) or _MC_NAMED_COLORS.get(color_l)
-            if resolved is None and color_l.startswith('#'):
-                # 直接使用 hex 颜色(JSON 组件树允许 #RRGGBB)
+            if resolved is None and color_l.startswith('#') and re.fullmatch(r'#[0-9a-fA-F]{3,8}', color):
+                # 直接使用 hex 颜色(JSON 组件树允许 #RRGGBB); 严格白名单,
+                # 防止 color 字段夹带引号/尖括号击穿 style 属性(审计 F002)
                 resolved = color
             if resolved:
                 cur['color'] = resolved
@@ -208,9 +209,11 @@ def _parse_motd_segments(data, state: dict, out: list) -> None:
                          ('underlined', 'underline'), ('strikethrough', 'strike')):
             if data.get(key) is not None:
                 cur[fmt] = bool(data[key])
-        _parse_motd_segments(data.get('text', ''), cur, out)
+        if depth >= _MOTD_MAX_DEPTH:
+            return
+        _parse_motd_segments(data.get('text', ''), cur, out, depth + 1)
         for item in data.get('extra') or []:
-            _parse_motd_segments(item, cur, out)
+            _parse_motd_segments(item, cur, out, depth + 1)
     elif isinstance(data, list):
         for item in data:
             _parse_motd_segments(item, state, out)
@@ -334,6 +337,34 @@ _HTTP_SESSION: Optional[aiohttp.ClientSession] = None
 # 全局共享 HTTP 会话的 User-Agent：显式声明身份, 规避 Cloudflare 按浏览器签名(error 1010)封禁
 # Python 默认 UA 的问题; 不带版本号, 避免成为需要同步维护的第五处版本位置
 _HTTP_SESSION_UA = "astrbot-plugin-minecraft-motd (+https://github.com/Hayston1001/astrbot_plugin_minecraft_motd)"
+
+
+# 审计 F001/F005/F006/F007: 渲染端 Jinja2 不转义(autoescape=False), 服务器可控数据
+# 必须在进入模板前经白名单/转义处理; 模板内文本插值点统一使用 |e 过滤器。
+_UUID_RE = re.compile(r'^[0-9a-fA-F-]{8,36}$')
+_ICON_RE = re.compile(r'^data:image/(?:png|jpe?g|gif|webp);base64,[A-Za-z0-9+/=]+$', re.IGNORECASE)
+_ICON_MAX_BYTES = 64 * 1024
+_MOTD_MAX_DEPTH = 20
+
+
+def _is_valid_icon_data_uri(value) -> bool:
+    """校验服务器上报的图标 data URI: 格式白名单 + 解码后尺寸上限(审计 F001/F014)"""
+    if not isinstance(value, str) or len(value) > _ICON_MAX_BYTES * 4 // 3 + 160:
+        return False
+    if not _ICON_RE.match(value):
+        return False
+    try:
+        data = base64.b64decode(value.split(",", 1)[1], validate=True)
+    except Exception:
+        return False
+    return 0 < len(data) <= _ICON_MAX_BYTES
+
+
+def _safe_uuid(value) -> str:
+    """玩家 UUID 白名单(审计 F006: uuid 会拼进头像 URL, 只允许 hex 与连字符)"""
+    if isinstance(value, str) and _UUID_RE.match(value):
+        return value
+    return ""
 
 
 def _get_http_session() -> aiohttp.ClientSession:
@@ -576,7 +607,7 @@ async def get_player_avatars(players: list, ttl_hours: float = AVATAR_TTL_HOURS_
 
 def cache_server_icon(server_address: str, icon_data_uri: str) -> None:
     """将查询结果自带的服务器图标 data URI 写入磁盘缓存(每次成功查询自动刷新)"""
-    if not icon_data_uri or not icon_data_uri.startswith("data:image"):
+    if not _is_valid_icon_data_uri(icon_data_uri):
         return
     try:
         data = base64.b64decode(icon_data_uri.split(",", 1)[1])
@@ -1554,8 +1585,8 @@ body {
   <div class="err-body">
     <div class="err-icon">✖</div>
     <div class="err-title">无法连接到服务器</div>
-    <div class="err-msg">{{ error_msg }}</div>
-    <div class="err-addr">{{ server_address }} · {{ edition_label }}</div>
+    <div class="err-msg">{{ error_msg|e }}</div>
+    <div class="err-addr">{{ server_address|e }} · {{ edition_label }}</div>
   </div>
 
   {% else %}
@@ -1564,21 +1595,21 @@ body {
     <div class="slot icon-slot">
       {% if icon %}
       <img src="{{ icon }}" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
-      <div class="icon-letter" style="display:none">{{ server_address[0]|upper }}</div>
+      <div class="icon-letter" style="display:none">{{ server_address[0]|e|upper }}</div>
       {% else %}
-      <div class="icon-letter">{{ server_address[0]|upper }}</div>
+      <div class="icon-letter">{{ server_address[0]|e|upper }}</div>
       {% endif %}
     </div>
     {% endif %}
     <div class="head-main">
       <div class="addr-row">
-        <span class="addr">{{ server_address }}</span>
+        <span class="addr">{{ server_address|e }}</span>
         <span class="badge">{{ badge }}</span>
       </div>
       <div class="meta-row">
-        <span>版本 {{ server_version }}</span>
-        {% if client_version and client_version != server_version %}<span>支持 {{ client_version }}</span>{% endif %}
-        {% if via_hint %}<span class="via-tag">{{ via_hint }}</span>{% endif %}
+        <span>版本 {{ server_version|e }}</span>
+        {% if client_version and client_version != server_version %}<span>支持 {{ client_version|e }}</span>{% endif %}
+        {% if via_hint %}<span class="via-tag">{{ via_hint|e }}</span>{% endif %}
       </div>
     </div>
     {% if show_latency and latency_ms is not none %}
@@ -1606,11 +1637,11 @@ body {
         {% elif p.uuid %}
         <img class="p-head" src="https://mc-heads.net/avatar/{{ p.uuid }}/32" alt=""
              onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
-        <div class="p-fallback" style="display:none; background: rgba(0,0,0,0.5); border: 2px solid {{ p.color }}; color: {{ p.color }}">{{ (p.name or '?')[0]|upper }}</div>
+        <div class="p-fallback" style="display:none; background: rgba(0,0,0,0.5); border: 2px solid {{ p.color }}; color: {{ p.color }}">{{ (p.name or '?')[0]|e|upper }}</div>
         {% else %}
-        <div class="p-fallback" style="background: rgba(0,0,0,0.5); border: 2px solid {{ p.color }}; color: {{ p.color }}">{{ (p.name or '?')[0]|upper }}</div>
+        <div class="p-fallback" style="background: rgba(0,0,0,0.5); border: 2px solid {{ p.color }}; color: {{ p.color }}">{{ (p.name or '?')[0]|e|upper }}</div>
         {% endif %}
-        <span class="p-name">{{ p.name }}</span>
+        <span class="p-name">{{ p.name|e }}</span>
       </div>
       {% endfor %}
       {% if extra_count > 0 %}<div class="p-chip p-more">+{{ extra_count }}</div>{% endif %}
@@ -1620,7 +1651,7 @@ body {
   {% endif %}
 
 </div>
-<div class="foot">{{ footer_text }}</div>
+<div class="foot">{{ footer_text|e }}</div>
 </div>
 '''
 
@@ -2003,15 +2034,15 @@ body {
   <div class="head">
     <div class="head-main">
       <div class="addr-row">
-        <span class="addr">{{ proxy.address }}</span>
+        <span class="addr">{{ proxy.address|e }}</span>
         <span class="badge">PROXY</span>
       </div>
     </div>
   </div>
   <div class="err-body">
     <div class="err-title">无法连接到代理服务器</div>
-    <div class="err-msg">{{ proxy.error_msg }}</div>
-    <div class="err-addr">{{ proxy.address }}</div>
+    <div class="err-msg">{{ proxy.error_msg|e }}</div>
+    <div class="err-addr">{{ proxy.address|e }}</div>
   </div>
 
   {% else %}
@@ -2028,12 +2059,12 @@ body {
     {% endif %}
     <div class="head-main">
       <div class="addr-row">
-        <span class="addr">{{ proxy.address }}</span>
+        <span class="addr">{{ proxy.address|e }}</span>
         <span class="badge">PROXY</span>
       </div>
       <div class="meta-row">
-        <span>版本 {{ proxy.server_version }}</span>
-        {% if proxy.via_hint %}<span class="via-tag">{{ proxy.via_hint }}</span>{% endif %}
+        <span>版本 {{ proxy.server_version|e }}</span>
+        {% if proxy.via_hint %}<span class="via-tag">{{ proxy.via_hint|e }}</span>{% endif %}
       </div>
     </div>
     {% if show_latency and proxy.latency_ms is not none %}
@@ -2062,13 +2093,13 @@ body {
     <div class="sub-cell {% if sub.is_error %}error{% elif sub.is_offline %}offline{% endif %}">
       <div class="sub-head">
         <span class="dot {% if sub.is_error %}dot-error{% elif sub.is_offline %}dot-offline{% else %}dot-online{% endif %}"></span>
-        <span class="sub-name">{{ sub.name }}</span>
+        <span class="sub-name">{{ sub.name|e }}</span>
         {% if not sub.is_error and not sub.is_offline %}
         <span class="sub-players">{{ sub.online_str }}<span class="fraction">/{{ sub.max_str }}</span></span>
         {% endif %}
       </div>
       {% if sub.is_error %}
-      <div class="sub-error-text">{{ sub.error_msg }}</div>
+      <div class="sub-error-text">{{ sub.error_msg|e }}</div>
       {% elif sub.is_offline %}
       <div class="mini-track"><div class="mini-fill" style="width: 0%"></div></div>
       <div class="sub-offline-text">未启动</div>
@@ -2087,7 +2118,7 @@ body {
   {% endif %}
 
 </div>
-<div class="foot">{{ footer_text }}</div>
+<div class="foot">{{ footer_text|e }}</div>
 </div>
 '''
 
@@ -2395,8 +2426,14 @@ class MOTDPlugin(Star):
                 motd_data = plain_visible[:max_length] + '…'
 
         segments = []
-        _parse_motd_segments(motd_data, _default_motd_state(), segments)
-        html = _render_motd_segments(segments)
+        try:
+            _parse_motd_segments(motd_data, _default_motd_state(), segments)
+            html = _render_motd_segments(segments)
+        except Exception as e:  # 含 RecursionError(解析深度已封顶, 此处为兜底)
+            # 审计 F013: 畸形组件树不再让异常逃逸到查询主流程(调用点在 try 之外)
+            logger.warning(f"[MOTD] MOTD 组件树解析失败, 降级纯文本: {e}")
+            segments = []
+            html = ""
         if html:
             return html
         # 空结果兜底：输出转义后的纯文本
@@ -2528,8 +2565,12 @@ class MOTDPlugin(Star):
         """
         icon = result.get("icon")
         if icon:
-            cache_server_icon(server_address, icon)
-            return icon
+            if not _is_valid_icon_data_uri(icon):
+                # 审计 F001: 恶意服务器可在 icon 字段注入任意字符串, 校验不过直接丢弃
+                logger.warning(f"[MOTD] 服务器上报图标未通过校验, 已丢弃: {server_address}")
+            else:
+                cache_server_icon(server_address, icon)
+                return icon
         cached = get_cached_server_icon(server_address)
         if cached:
             logger.info(f"[MOTD] 本次查询未返回图标, 使用磁盘缓存图标: {server_address}")
@@ -2575,7 +2616,7 @@ class MOTDPlugin(Star):
             for p in sample[:8]:
                 if isinstance(p, dict):
                     name = p.get("name") or "未知"
-                    uuid = p.get("uuid") or p.get("id") or ""
+                    uuid = _safe_uuid(p.get("uuid") or p.get("id") or "")
                 else:
                     name, uuid = str(p), ""
                 entry = {"name": name, "uuid": uuid, "color": _player_color(name)}
