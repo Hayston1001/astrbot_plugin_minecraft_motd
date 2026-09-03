@@ -396,6 +396,15 @@ async def _close_http_session() -> None:
 AVATAR_TTL_HOURS_DEFAULT = 12   # 玩家头像刷新周期(小时, 可在配置中调整)
 NEG_CACHE_TTL_MINUTES_DEFAULT = 10   # 头像下载失败负缓存默认时长(分钟, 可在配置 avatar_neg_cache_ttl 中调整, 0=关闭)
 _NEG_CACHE: Dict[str, float] = {}
+_MEM_CACHE_MAX_ENTRIES = 1024   # 审计 F035: 内存缓存容量上限(仅内存态, 不涉及磁盘文件)
+
+
+def _put_capped(cache: dict, key, value) -> None:
+    """带容量上限的内存缓存写入(FIFO 淘汰最旧条目, 防任意 key 撑爆内存)"""
+    cache[key] = value
+    while len(cache) > _MEM_CACHE_MAX_ENTRIES:
+        oldest = next(iter(cache))
+        cache.pop(oldest, None)
 _AVATAR_FETCH_SEM = asyncio.Semaphore(4)  # 头像并发下载上限: 削弱冷缓存时 8 路并发 TLS 握手在单核弱机上的 CPU 尖刺
 
 
@@ -417,22 +426,40 @@ def _get_cache_dir(subdir: str) -> Optional[Path]:
 
 
 def _safe_filename(key: str) -> str:
-    """将缓存键转为安全文件名"""
-    return re.sub(r'[^0-9a-zA-Z._-]', '_', key)[:100]
+    """将缓存键转为安全文件名
+
+    审计 F036: 超过 100 字符的键截断时追加内容哈希后缀, 避免不同长键
+    截断后同名互串(服务器自报超长玩家名可互相错用头像)。
+    """
+    safe = re.sub(r'[^0-9a-zA-Z._-]', '_', key)
+    if len(safe) <= 100:
+        return safe
+    return safe[:89] + "-" + hashlib.md5(key.encode("utf-8")).hexdigest()[:10]
 
 
 def _cache_read_any(path: Path) -> Optional[bytes]:
-    """读取缓存文件(不检查 TTL：即使过期也返回, 供“刷新失败沿用旧缓存”使用)"""
+    """读取缓存文件(不检查 TTL：即使过期也返回, 供“刷新失败沿用旧缓存”使用)
+
+    审计 F037: 空文件视为损坏(写盘中断的产物), 返回 None 走重新下载。
+    """
     try:
-        return path.read_bytes()
+        data = path.read_bytes()
     except OSError:
         return None
+    if not data:
+        return None
+    return data
 
 
 def _cache_write(path: Path, data: bytes) -> bool:
-    """写入缓存文件(mtime 即下载时间), 失败不抛出"""
+    """写入缓存文件(mtime 即下载时间), 失败不抛出
+
+    审计 F037: 先写临时文件再 os.replace 原子落盘, 断电/崩溃不会留下半截文件。
+    """
+    tmp = path.with_name(path.name + ".tmp")
     try:
-        path.write_bytes(data)
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
         os.utime(path, None)
         return True
     except OSError as e:
@@ -516,8 +543,16 @@ async def _fetch_image_bytes(url: str, timeout: float = 2.5) -> Optional[bytes]:
                 url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
             if resp.status != 200:
                 return None
-            data = await resp.read()
-            if data and len(data) <= 100_000:  # 32px 头像通常 <5KB, 防御异常大响应
+            # 审计 F038: 流式读取并即时限长(100KB), 超限立即中止, 不再全量缓冲后才发现
+            chunks = []
+            total = 0
+            async for chunk in resp.content.iter_chunked(16384):
+                total += len(chunk)
+                if total > 100_000:  # 32px 头像通常 <5KB, 防御异常大响应
+                    return None
+                chunks.append(chunk)
+            data = b"".join(chunks)
+            if data:
                 return data
     except Exception:
         pass
@@ -546,7 +581,8 @@ async def get_player_avatars(players: list, ttl_hours: float = AVATAR_TTL_HOURS_
     result: Dict[str, str] = {}
     todo: Dict[str, Tuple[str, str]] = {}  # key -> (uuid, name)
     offline_names: list = []  # 本次检测到的离线模式玩家名(仅用于日志)
-    now = time.time()
+    now = time.time()            # 墙钟: 与磁盘文件 mtime 比较
+    now_mono = time.monotonic()  # 审计 F039: 单调时钟: 内存负缓存 TTL(不受 NTP 跳变影响)
     for p in players:
         if not isinstance(p, dict):
             continue
@@ -564,7 +600,7 @@ async def get_player_avatars(players: list, ttl_hours: float = AVATAR_TTL_HOURS_
             if not stale:
                 continue  # 缓存未过期：直接使用, 不发起下载
         # 无缓存或已过期：尝试刷新(负缓存仅限制重试频率, 不影响旧缓存展示)
-        if neg_ttl > 0 and _NEG_CACHE.get(key, 0) + neg_ttl > now:
+        if neg_ttl > 0 and _NEG_CACHE.get(key, 0) + neg_ttl > now_mono:
             continue
         if _is_offline_uuid(uuid, name):
             # 离线模式 UUID(盗版服)：Mojang 库无此档案, UUID 头像源必然 404, 
@@ -589,7 +625,7 @@ async def get_player_avatars(players: list, ttl_hours: float = AVATAR_TTL_HOURS_
                     if cache_dir is not None:
                         _cache_write(cache_dir / f"{_safe_filename(key)}.png", data)
                     return
-            _NEG_CACHE[key] = time.time()
+            _put_capped(_NEG_CACHE, key, time.monotonic())  # 审计 F039: 单调时钟
         if key in result:
             logger.info(f"[MOTD] 玩家头像刷新失败, 继续使用旧缓存: {name}")
         else:
@@ -858,7 +894,7 @@ async def _resolve_minecraft_srv(host: str) -> Optional[Tuple[str, int]]:
     多解析器并发竞速, 谁先给出明确答案(NXDOMAIN/NOERROR)用谁——与 Java 查询的 API/直连竞速同款模式; 
     正/负结果均写缓存; 全部解析器失败时沿用已过期的旧缓存(TTL 仅作刷新周期). 
     """
-    now = time.time()
+    now = time.monotonic()  # 审计 F041: 单调时钟(内存缓存 TTL)
     cached = _SRV_CACHE.get(host)
     if cached and cached[2] > now:
         return (cached[0], cached[1]) if cached[0] else None       # 缓存命中(含负缓存)
@@ -905,10 +941,10 @@ async def _resolve_minecraft_srv(host: str) -> Optional[Tuple[str, int]]:
             return stale
         return None
     if srv:
-        _SRV_CACHE[host] = (srv[0], srv[1], time.time() + ttl)     # ttl 已夹在 60~3600 秒
+        _put_capped(_SRV_CACHE, host, (srv[0], srv[1], time.monotonic() + ttl))     # ttl 已夹在 60~3600 秒, 单调时钟(审计 F041)
         logger.info(f"[MOTD] SRV 解析成功: {host} -> {srv[0]}:{srv[1]} (缓存 {ttl}s)")
     else:
-        _SRV_CACHE[host] = (None, 0, time.time() + SRV_NEG_TTL_SECONDS)
+        _put_capped(_SRV_CACHE, host, (None, 0, time.monotonic() + SRV_NEG_TTL_SECONDS))
         logger.info(f"[MOTD] 无 SRV 记录, 直连 A 记录: {host} (负缓存 {SRV_NEG_TTL_SECONDS}s)")
     return srv
 
