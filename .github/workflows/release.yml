@@ -13,18 +13,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Get version from tag
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Verify tag matches metadata version
+        run: |
+          # 审计 F030: 防止误贴 tag 发布错版本
+          META_VERSION="$(grep '^version:' metadata.yaml | sed 's/version:[[:space:]]*//' | tr -d '[:space:]')"
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          if [ "v${META_VERSION}" != "v${TAG_VERSION}" ]; then
+            echo "::error::tag v${TAG_VERSION} 与 metadata.yaml version ${META_VERSION} 不一致, 终止发布"
+            exit 1
+          fi
+          echo "版本校验通过: v${TAG_VERSION}"
 
       - name: Extract changelog
         id: changelog
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
           # 提取当前版本的changelog内容（从 ## vX.Y.Z 到下一个 ## 或文件结尾）
-          NOTES=$(sed -n "/^## v${VERSION}/,/^## v/{/^## v${VERSION}/d;/^## v/d;p;}" CHANGELOG.md)
+          # 审计 F028: 改用 awk 整行精确匹配(原 sed 的正则点号未转义且未锚定行,
+          # 短前缀 tag 如 v3.0 会误匹配 v3.0.0 的小节)
+          NOTES=$(awk -v header="## v${VERSION}" '$0 == header {p=1; next} /^## v/ && p {exit} p' CHANGELOG.md)
           if [ -z "$NOTES" ]; then
             NOTES="No release notes found in CHANGELOG.md"
           fi
@@ -42,7 +55,7 @@ jobs:
           zip -r "${PACKAGE_NAME}.zip" "${PACKAGE_NAME}"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           name: v${{ steps.version.outputs.VERSION }}
           body: ${{ steps.changelog.outputs.NOTES }}
