@@ -2,7 +2,7 @@
 
 # MC 服务器状态查询(AstrBot MOTD 查询插件)
 
-一个用于查询 Minecraft 服务器状态的 AstrBot 插件. 支持 Java 版和基岩版服务器, **兼容 ViaVersion 多版本服务器**, **支持 Velocity 代理子服查询**. 
+一个用于查询 Minecraft 服务器状态的 AstrBot 插件. 支持 Java 版和基岩版服务器, **兼容 ViaVersion 多版本服务器**, **支持 Velocity 代理子服查询**
 
 ![插件输出图片效果预览图1](https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/assets/preview_java.png)
 ![插件输出图片效果预览图2](https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/assets/preview_bedrock.png)
@@ -12,13 +12,12 @@
 
 - **MOTD 查询**: 查询 Minecraft 服务器的 MOTD、在线玩家、版本等信息
 - **支持 SRV**: 直连查询自动解析 SRV 记录(与原版客户端行为一致), 显式指定端口时不查询 SRV(v2.4+)
-- **像素风卡片**: 泥土纹理背景 + MC GUI 浮雕面板 + 物品栏格子槽 + XP 条式玩家进度条(v2)
-- **彩色 MOTD 还原**: 支持 § 颜色码与粗体/斜体/下划线/删除线格式码、§r 重置、JSON 组件树, API 与直连两条查询路径渲染风格一致(v2)
-- **服务器图标**: 直接展示服务器 64×64 图标(像素放大渲染), 无图标时显示像素占位块(v2)
-- **在线玩家头像列表**: 展示最多 8 名在线玩家的头像与昵称, 超出显示 +N(v2)
-- **查询延迟显示**: 卡片展示本次查询耗时(绿/金/红分级)(v2)
+- **像素风卡片**: 泥土纹理背景 + MC GUI 浮雕面板 + 物品栏格子槽 + XP 条式玩家进度条(v2+)
+- **MOTD 还原**: 支持颜色码/格式码/JSON 组件树(v2+)
+- **服务器图标**: 无图标时显示像素占位块(v2+)
+- **在线玩家头像列表**: 展示最多 8 名在线玩家的头像与昵称(v2+)
 - **双平台支持**: 同时支持 Java 版和基岩版服务器查询
-- **ViaVersion 兼容**: 智能识别 ViaVersion 多版本服务器, 正确显示版本范围
+- **ViaVersion 兼容**: 正确识别 ViaVersion 多版本(`send-supported-versions: true`)(v3+)
 - **代理服务器查询**: 支持查询 Velocity 代理及其子服状态
 - **无需斜杠触发**: 直接输入 `motd` 即可触发, 无需 `/` 前缀
 - **默认服务器**: 可配置默认查询的服务器, 简化指令使用
@@ -39,14 +38,17 @@
 
 ## ViaVersion 兼容性
 
-本插件支持安装了 ViaVersion/ViaBackwards 的服务器：
+| 服务器形态 | 上报内容 | 插件显示 |
+|------|----------|----------|
+| Velocity / BungeeCord / Waterfall 代理 | 版本名自带范围 | 版本范围 |
+| ping 响应携带 `supportedVersions` | 协议号数组 | 版本范围 |
+| 版本名自带范围/列举 | 版本名即范围 | 解析为版本区间 |
+| 协议号 `-1/0`(部分代理/网关) | 识别为多版本模式 | 正确显示 |
 
-| 情况 | 处理方式 |
-|------|----------|
-| `protocol.version = -1/0` | 识别为多版本模式, 显示 `多版本` 而非 `-1` |
-| `version.name` 含版本范围 | 自动提取并显示 `支持客户端版本: 1.8 - 1.21.3` |
-| Paper/Spigot + ViaVersion | 解析协议号范围并转换为版本号显示 |
-| ViaVersion 字样检测 | 自动识别并标注 ViaVersion 兼容 |
+显示版本范围的场景: 
+
+1. `plugins/ViaVersion/config.yml` 设置 `send-supported-versions: true`
+2. 使用 Velocity/BungeeCord 代理
 
 ## 代理服务器查询(v1.6+)
 
@@ -108,7 +110,9 @@
 | `velostat_api_url` | velostat API 地址 | `http://代理IP:8080` |
 | `sub_servers` | 子服地址列表 | `lobby:host:port,survival:host:port` |
 | `enable_all_sessions` | 对所有会话生效 | true |
-| `use_api` | 使用 API 竞速查询(API 与直连并发, 谁先成功用谁, 共享 query_timeout 死线) | true |
+| `enabled_sessions` | 会话白名单(关闭"对所有会话生效"后生效, 填会话 ID, 可用 `/sid` 获取) | `[]` |
+| `admin_only_config` | 仅管理员可修改本插件配置(影响 `/motdconfig` 指令) | true |
+| `use_api` | 调用 API 并发查询, 部分情况下可互补 | true |
 | `output_mode` | 输出模式: `image` 渲染像素风图片卡片 / `text` 纯文本(跳过渲染与头像预取, 几乎零开销) | `image` |
 | `card_height_mode` | 卡片高度: `auto` 随内容自适应(紧凑无留白) / `fixed` 固定高度 720px(玩家少时补白, 尺寸统一) | `auto` |
 | `show_server_icon` | 显示服务器图标 | true |
@@ -117,7 +121,7 @@
 | `query_timeout` | 查询总超时时间(秒), 所有查询方式共享同一死线, 超时的分支返回各自的具体错误 | `5` |
 | `prefetch_avatars` | 预取玩家头像并内嵌渲染图(带磁盘缓存) | true |
 | `avatar_cache_ttl` | 头像刷新周期(小时), 过期后尝试重新下载, 失败继续用旧缓存 | `12` |
-| `avatar_neg_cache_ttl` | 头像负缓存(分钟), 失败后该时长内不再重试下载; 0 为关闭; 混合登录的服务器应延长此时间 | `10` |
+| `avatar_neg_cache_ttl` | 头像负缓存(分钟), 失败后该时长内不再重试下载; 0 为关闭 | `30` |
 
 ### 2. 配置文件方式
 
@@ -138,7 +142,7 @@
     "card_height_mode": "auto",
     "prefetch_avatars": true,
     "avatar_cache_ttl": 12,
-    "avatar_neg_cache_ttl": 10,
+    "avatar_neg_cache_ttl": 30,
     "show_server_icon": true,
     "show_player_list": true,
     "show_latency": true
@@ -160,7 +164,7 @@
     "card_height_mode": "auto",
     "prefetch_avatars": true,
     "avatar_cache_ttl": 12,
-    "avatar_neg_cache_ttl": 10,
+    "avatar_neg_cache_ttl": 30,
     "show_server_icon": true,
     "show_player_list": true,
     "show_latency": true
@@ -182,7 +186,7 @@
     "card_height_mode": "auto",
     "prefetch_avatars": true,
     "avatar_cache_ttl": 12,
-    "avatar_neg_cache_ttl": 10,
+    "avatar_neg_cache_ttl": 30,
     "show_server_icon": true,
     "show_player_list": true,
     "show_latency": true
@@ -235,11 +239,11 @@
 
 3. **检查日志级别**
    - 在 `data/cmd_config.json` 中设置 `"log_level": "DEBUG"`
-   - 重启后查看是否有 `[MOTD] 收到消息` 的日志
+   - 重启后发送 motd 查询, 查看是否有 `[MOTD] 匹配到 motd 指令`(无斜杠)或 `[MOTD] 收到 /motd 指令`(斜杠)的日志
 
 4. **检查白名单**
-   - 如果开启了 ID 白名单, 确保你的 QQ 号在白名单中
-   - 或者在 WebUI 中关闭白名单限制
+   - 如果关闭了"对所有会话生效", 需要将会话 ID(不是 QQ 号)加入 `enabled_sessions` 白名单, 会话 ID 可用 `/sid` 指令获取
+   - 或者在 WebUI 中重新开启"对所有会话生效"
 
 5. **QQ 官方机器人**
    - 确认群设置已开启「机器人主动在群聊内发言」与「获取群内全部消息」(见上文使用前提)

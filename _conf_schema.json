@@ -66,9 +66,9 @@
         "default": 5
     },
     "use_api": {
-        "description": "使用 API 竞速查询服务器",
+        "description": "调用 API",
         "type": "bool",
-        "hint": "mcstatus.io API 与 TCP 直连并发竞速(更快); 关闭则仅直连查询",
+        "hint": "调用 mcstatus.io API 与 TCP 直连并发查询(推荐)",
         "default": true
     },
     "output_mode": {
@@ -103,8 +103,8 @@
     "avatar_neg_cache_ttl": {
         "description": "头像下载失败负缓存(分钟)",
         "type": "int",
-        "hint": "头像下载失败后, 该时长内不再重复尝试下载; 0 为关闭负缓存; 建议混合登录的服务器适当延长此值",
-        "default": 10,
+        "hint": "头像下载失败后, 该时长内不再重复尝试下载",
+        "default": 30,
         "condition": {"output_mode": "image"}
     },
     "show_server_icon": {

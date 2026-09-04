@@ -1,5 +1,36 @@
 # Changelog
 
+## v3.0.0
+
+> 本次版本为安全与可靠性大版本, 源自对 v2.4.0 的全量审计
+
+### 安全
+
+- 严重(F001): 修复恶意服务器可经 favicon 字段向渲染端注入任意 HTML/JS 的问题——图标现按 data URI 白名单 + 64KB 尺寸上限校验, 不合法直接丢弃
+- F002/F005/F006/F007/F020: 渲染端 Jinja2 不转义(autoescape=False), 全面转义服务器可控与用户可控字段(server_address/错误信息/版本名/via_hint/玩家名/子服名/footer, 模板 22 处补 |e 过滤器); MOTD JSON color 字段 hex 白名单校验, 杜绝 style 属性击穿; 玩家 UUID 白名单(仅 hex/连字符), 防头像 URL 属性逃逸
+- F040: DNS 应答只接受所查询解析器 :53 来源、基岩应答只接受目标主机, 丢弃任意来源伪造应答
+- F016: 直连状态响应 JSON 长度上限 128KB, 防恶意服务器超时窗口内撑爆内存
+- F013: MOTD 组件树递归深度封顶, 畸形嵌套不再使查询异常逃逸
+
+### 修复
+
+- F009/F008/F004/F012: 基岩版查询链三连修复——v2.3.0 起 to_thread 误用于 async 函数导致基岩查询 100% 失败; 人数为 str 触发格式化 ValueError; Unconnected Ping 缺 RakNet MAGIC/GUID 被 BDS 系服务器静默丢弃。基岩查询现端到端可用
+- F011/F010: 斜杠指令(/motd /motd-bedrock /motdr /motdconfig)因框架剥离唤醒前缀 + 自身 guard 全部不可达, 改为基于消息链首段判定; /motd-config 类地址含「-bedrock」子串不再误路由为基岩查询
+- F021/F059: admin_only_config 配置项恢复语义(开启时非管理员不能改配置); 配置保存失败时如实回执
+- F003: BungeeCord 当前版本名「BungeeCord 1.8.x-26.x」解析为「支持 1.8 ~ 26.x」(旧版误显示 ≤ 1.8)
+- F051: 消费 ViaVersion send-supported-versions 上报的 supportedVersions 协议号数组, 开启该选项的服务器显示客户端支持范围与 ViaVersion 标识
+- F050: MOTD 文本格式化支持嵌套 extra 与 translate 组件
+- F049/F058: 裸 IPv6 地址解析修正
+
+### 加固
+
+- F015/F017: SRV 多解析器竞速与 Java 查询竞速在外层被取消时回收全部子任务
+- F018/F022: 直连响应形状归一(version/players 非 dict 防御), mcstatus.io 返回 version=null 不再导致异常
+- F023: 图片/文本发送 30s 超时兜底, 发送通道挂起不再永久占住发送闸门
+- F019: velostat API 响应形状校验
+- F035/F036/F037/F038/F039/F041: 缓存写原子化、空文件拒绝、下载流式限长、缓存键防碰撞、内存缓存容量上限、TTL 改单调时钟
+- F043: 直连连接关闭补 wait_closed; F034: 共享会话懒重建语义说明
+
 ## v2.4.0
 - BUG: Java 直连查询构造握手包时 `_pack_varint(-1)` 在 Python 中死循环(负数右移恒为负), TCP 连接成功后事件循环被永久占死. 现按原版客户端线格式将协议号 -1 编码为无符号 32 位(FF FF FF FF 0F)
 - 新增直连 SRV 记录支持: 输入纯域名且未显式指定端口时, 先查询 `_minecraft._tcp.<host>` 的 SRV 记录(与原版客户端行为一致), 命中则按记录的 target:port 建立连接, 握手包仍携带用户输入的原始地址; 显式指定端口(如 `host:port`)时不查询 SRV

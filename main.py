@@ -162,7 +162,7 @@ def _default_motd_state() -> dict:
 
 
 def _apply_section_code(state: dict, code: str) -> None:
-    """将一个 § 格式码应用到状态上(MC 语义：颜色码会重置已有格式, §r 全部重置)"""
+    """将一个 § 格式码应用到状态上(MC 语义: 颜色码会重置已有格式, §r 全部重置)"""
     code = code.lower()
     if code == 'r':
         state.update(_default_motd_state())
@@ -170,14 +170,14 @@ def _apply_section_code(state: dict, code: str) -> None:
         state.update(_default_motd_state())
         state["color"] = MINECRAFT_COLOR_MAP[code]
     elif code == 'k':
-        pass  # 混淆码(§k)：静态渲染环境无动态效果, 忽略
+        pass  # 混淆码(§k): 静态渲染环境无动态效果, 忽略
     elif code in _MC_FORMAT_CODES:
         state[_MC_FORMAT_CODES[code]] = True
 
 
 def _parse_motd_segments(data, state: dict, out: list, depth: int = 0) -> None:
     """递归解析 MOTD 数据(§ 码字符串 / JSON 组件树 / 列表)为样式段列表
-    JSON 组件树语义：子组件继承父组件样式, 自身字段可覆盖(显式 false 也覆盖)
+    JSON 组件树语义: 子组件继承父组件样式, 自身字段可覆盖(显式 false 也覆盖)
     """
     if data is None:
         return
@@ -204,7 +204,7 @@ def _parse_motd_segments(data, state: dict, out: list, depth: int = 0) -> None:
                 cur['color'] = resolved
             elif color_l == 'reset':
                 cur = _default_motd_state()
-        # JSON 组件格式字段：存在即覆盖(含显式 false)
+        # JSON 组件格式字段: 存在即覆盖(含显式 false)
         for key, fmt in (('bold', 'bold'), ('italic', 'italic'),
                          ('underlined', 'underline'), ('strikethrough', 'strike')):
             if data.get(key) is not None:
@@ -328,14 +328,14 @@ def _build_version_to_protocol():
         if start_parts == end_parts:
             _VERSION_TO_PROTOCOL[".".join(str(x) for x in start_parts)] = proto
         else:
-            # 范围映射：首尾版本都指向同一个协议号
+            # 范围映射: 首尾版本都指向同一个协议号
             for ver in [
                 ".".join(str(x) for x in start_parts),
                 ".".join(str(x) for x in end_parts),
             ]:
                 _VERSION_TO_PROTOCOL[ver] = proto
 
-    # 特殊映射：范围内未被自动覆盖的中间版本
+    # 特殊映射: 范围内未被自动覆盖的中间版本
     _VERSION_TO_PROTOCOL["26.1.1"] = 775  # 26.1.1 在 26.1.0 和 26.1.2 之间, 共享协议 775
 
 
@@ -380,7 +380,7 @@ def _html_escape(text: str) -> str:
 _HTTP_SESSION: Optional[aiohttp.ClientSession] = None
 
 
-# 全局共享 HTTP 会话的 User-Agent：显式声明身份, 规避 Cloudflare 按浏览器签名(error 1010)封禁
+# 全局共享 HTTP 会话的 User-Agent: 显式声明身份, 规避 Cloudflare 按浏览器签名(error 1010)封禁
 # Python 默认 UA 的问题; 不带版本号, 避免成为需要同步维护的第五处版本位置
 _HTTP_SESSION_UA = "astrbot-plugin-minecraft-motd (+https://github.com/Hayston1001/astrbot_plugin_minecraft_motd)"
 
@@ -432,11 +432,11 @@ async def _close_http_session() -> None:
 
 
 # ============================================================
-# 磁盘持久缓存：玩家头像 / 服务器图标
+# 磁盘持久缓存: 玩家头像 / 服务器图标
 # 目录规范(AstrBot 插件大文件存储标准):
 #   data/plugin_data/astrbot_plugin_minecraft_motd/avatars/  玩家头像
 #   data/plugin_data/astrbot_plugin_minecraft_motd/icons/    服务器图标
-# 下载时间写入文件 mtime; TTL 仅作为刷新周期：过期后下次查询尝试重新下载, 
+# 下载时间写入文件 mtime; TTL 仅作为刷新周期: 过期后下次查询尝试重新下载, 
 # 下载失败继续使用旧缓存(文件永不因过期删除, 仅 /motdr 手动清空)
 # ============================================================
 AVATAR_TTL_HOURS_DEFAULT = 12   # 玩家头像刷新周期(小时, 可在配置中调整)
@@ -484,7 +484,7 @@ def _safe_filename(key: str) -> str:
 
 
 def _cache_read_any(path: Path) -> Optional[bytes]:
-    """读取缓存文件(不检查 TTL：即使过期也返回, 供“刷新失败沿用旧缓存”使用)
+    """读取缓存文件(不检查 TTL: 即使过期也返回, 供“刷新失败沿用旧缓存”使用)
 
     审计 F037: 空文件视为损坏(写盘中断的产物), 返回 None 走重新下载。
     """
@@ -541,7 +541,7 @@ def _normalize_uuid(uuid: str) -> str:
 
 
 def _avatar_cache_key(uuid: str, name: str) -> str:
-    """头像缓存键：有 UUID 用 UUID, 否则用玩家名(保证查询与渲染两侧一致)"""
+    """头像缓存键: 有 UUID 用 UUID, 否则用玩家名(保证查询与渲染两侧一致)"""
     u = _normalize_uuid(uuid)
     if u:
         return f"u:{u}"
@@ -549,7 +549,7 @@ def _avatar_cache_key(uuid: str, name: str) -> str:
 
 
 def _offline_uuid(name: str) -> str:
-    """离线模式玩家 UUID：等价 Java UUID.nameUUIDFromBytes("OfflinePlayer:" + name)
+    """离线模式玩家 UUID: 等价 Java UUID.nameUUIDFromBytes("OfflinePlayer:" + name)
 
     盗版服(离线模式)按玩家名 MD5 推导 UUID, Mojang 数据库中不存在对应档案, 
     头像源按 UUID 查询必然查无此人. 
@@ -570,7 +570,7 @@ def _is_offline_uuid(uuid: str, name: str) -> bool:
 
 
 def _avatar_source_urls(uuid: str, name: str) -> list:
-    """头像下载源列表(按顺序回退)：UUID 优先, 无 UUID 时用玩家名"""
+    """头像下载源列表(按顺序回退): UUID 优先, 无 UUID 时用玩家名"""
     urls = []
     if uuid:
         urls.append(f"https://mc-heads.net/avatar/{uuid}/32")
@@ -609,12 +609,12 @@ async def get_player_avatars(players: list, ttl_hours: float = AVATAR_TTL_HOURS_
                              neg_ttl_minutes: float = NEG_CACHE_TTL_MINUTES_DEFAULT) -> Dict[str, str]:
     """批量获取玩家头像 data URI(磁盘持久缓存 + 多源回退 + 失败负缓存)
 
-    TTL 语义(stale-while-revalidate)：TTL 仅作为刷新周期——
-    - 缓存未过期：直接使用, 不发起下载; 
-    - 已过期或无缓存：本次查询尝试重新下载; 
-    - 离线模式 UUID(盗版服按名推导)：本地判定后完全跳过下载, 渲染用占位块; 
-    - 下载失败/超时：有旧缓存则继续用旧缓存, 从未成功获取过才用占位块; 
-    - 下载失败负缓存(neg_ttl_minutes, 分钟, 0=关闭)：失败后该时长内不再重试, 仅限制重试频率, 不影响旧缓存展示. 
+    TTL 语义(stale-while-revalidate): TTL 仅作为刷新周期——
+    - 缓存未过期: 直接使用, 不发起下载; 
+    - 已过期或无缓存: 本次查询尝试重新下载; 
+    - 离线模式 UUID(盗版服按名推导): 本地判定后完全跳过下载, 渲染用占位块; 
+    - 下载失败/超时: 有旧缓存则继续用旧缓存, 从未成功获取过才用占位块; 
+    - 下载失败负缓存(neg_ttl_minutes, 分钟, 0=关闭): 失败后该时长内不再重试, 仅限制重试频率, 不影响旧缓存展示. 
     - 缓存文件永不因过期删除(仅 /motdr 手动清空). 
 
     players: [{"name": str, "uuid": str}, ...]
@@ -644,12 +644,12 @@ async def get_player_avatars(players: list, ttl_hours: float = AVATAR_TTL_HOURS_
             except OSError:
                 stale = True
             if not stale:
-                continue  # 缓存未过期：直接使用, 不发起下载
-        # 无缓存或已过期：尝试刷新(负缓存仅限制重试频率, 不影响旧缓存展示)
+                continue  # 缓存未过期: 直接使用, 不发起下载
+        # 无缓存或已过期: 尝试刷新(负缓存仅限制重试频率, 不影响旧缓存展示)
         if neg_ttl > 0 and _NEG_CACHE.get(key, 0) + neg_ttl > now_mono:
             continue
         if _is_offline_uuid(uuid, name):
-            # 离线模式 UUID(盗版服)：Mojang 库无此档案, UUID 头像源必然 404, 
+            # 离线模式 UUID(盗版服): Mojang 库无此档案, UUID 头像源必然 404, 
             # 直接跳过下载(渲染时用占位块); 纯本地判定零网络成本, 也不进负缓存
             offline_names.append(name)
             continue
@@ -705,7 +705,7 @@ def cache_server_icon(server_address: str, icon_data_uri: str) -> None:
 def get_cached_server_icon(server_address: str) -> Optional[str]:
     """读取磁盘缓存的服务器图标 data URI(本次查询未返回图标时回退显示)
 
-    不设 TTL 门限：图标随每次查询自带最新值(即“尝试获取”), 
+    不设 TTL 门限: 图标随每次查询自带最新值(即“尝试获取”), 
     只要曾经成功获取过就持续沿用旧缓存, 从未获取过才返回 None. 
     """
     cache_dir = _get_cache_dir("icons")
@@ -720,14 +720,14 @@ def get_cached_server_icon(server_address: str) -> Optional[str]:
 async def query_java_server_api(host: str, port: int = JAVA_DEFAULT_PORT, *, timeout: float) -> Dict[str, Any]:
     """使用第三方 API 查询 Java 版服务器状态
 
-    timeout 必传(统一死线语义)：与直连支共享同一 query_timeout, 函数内部不再有任何固定超时值. 
+    timeout 必传(统一死线语义): 与直连支共享同一 query_timeout, 函数内部不再有任何固定超时值. 
     """
     _loop = asyncio.get_running_loop()
     _deadline = _loop.time() + timeout
     _t0 = time.perf_counter()
     try:
-        # 复用全局共享 HTTP 会话：会话由 terminate() 统一释放
-        # 显式 User-Agent：Cloudflare 会按 UA 指纹封禁(实测无 UA / Python-urllib 默认 UA 触发 1010 错误返回 403), 
+        # 复用全局共享 HTTP 会话: 会话由 terminate() 统一释放
+        # 显式 User-Agent: Cloudflare 会按 UA 指纹封禁(实测无 UA / Python-urllib 默认 UA 触发 1010 错误返回 403), 
         # aiohttp 默认 UA(Python/x aiohttp/x)目前未被列入黑名单
         session = _get_http_session()
         url = f"https://api.mcstatus.io/v2/status/java/{host}:{port}"
@@ -774,7 +774,7 @@ async def query_java_server_api(host: str, port: int = JAVA_DEFAULT_PORT, *, tim
                         {"name": p.get("name_clean") or p.get("name_raw") or p.get("name", ""), "uuid": p.get("uuid", "")}
                         for p in (players_data.get("list") or []) if isinstance(p, dict)
                     ]
-                    # MOTD 自渲染：优先取 raw JSON 组件树(保留颜色/格式), 回退纯文本
+                    # MOTD 自渲染: 优先取 raw JSON 组件树(保留颜色/格式), 回退纯文本
                     motd_data = data.get("motd", {})
                     if isinstance(motd_data, dict):
                         description = motd_data.get("raw") or motd_data.get("clean") or "无描述"
@@ -790,7 +790,7 @@ async def query_java_server_api(host: str, port: int = JAVA_DEFAULT_PORT, *, tim
                         "source": "api",
                     }
                 else:
-                    # 措辞注意：这是 mcstatus.io 探测节点的视角——目标服务器可能其实在线(例如探测节点被
+                    # 措辞注意: 这是 mcstatus.io 探测节点的视角——目标服务器可能其实在线(例如探测节点被
                     # Hypixel 这类带防护的大型服务器屏蔽, 或 API 自身故障), 竞速中由直连分支给出真实结果
                     return {"error": "API 探测报告服务器离线"}
             else:
@@ -802,8 +802,8 @@ async def query_java_server_api(host: str, port: int = JAVA_DEFAULT_PORT, *, tim
 
 
 # ============================================================
-# Minecraft SRV 记录解析：直连查询支持 SRV 重定向
-# 与原版客户端行为一致：输入纯域名且未显式指定端口(默认 25565)时, 
+# Minecraft SRV 记录解析: 直连查询支持 SRV 重定向
+# 与原版客户端行为一致: 输入纯域名且未显式指定端口(默认 25565)时, 
 # 先查询 _minecraft._tcp.<host> 的 SRV 记录, 命中则按 target:port 建立连接, 
 # 握手包仍携带用户输入的原始地址; 查不到或查询失败则回退直连 A 记录. 
 # 正/负结果均缓存(TTL 取 DNS 应答值, 夹在 60~3600 秒, 负结果固定 300 秒), 
@@ -826,7 +826,7 @@ def _is_ip_address(host: str) -> bool:
 
 
 def _get_srv_resolvers() -> List[str]:
-    """组装 SRV 查询的解析器列表：系统 DNS 优先(Linux/macOS 读 /etc/resolv.conf), 公共 DNS 兜底(国内优先)"""
+    """组装 SRV 查询的解析器列表: 系统 DNS 优先(Linux/macOS 读 /etc/resolv.conf), 公共 DNS 兜底(国内优先)"""
     global _SRV_RESOLVERS_CACHE
     if _SRV_RESOLVERS_CACHE:
         return _SRV_RESOLVERS_CACHE
@@ -853,7 +853,7 @@ def _dns_read_name(data: bytes, offset: int) -> Tuple[str, int]:
         if offset >= len(data):
             raise ValueError("DNS 域名越界")
         length = data[offset]
-        if length & 0xC0 == 0xC0:              # 压缩指针：低 6 位 + 下一字节构成报文内偏移
+        if length & 0xC0 == 0xC0:              # 压缩指针: 低 6 位 + 下一字节构成报文内偏移
             if offset + 1 >= len(data):
                 raise ValueError("DNS 指针越界")
             if not jumped:
@@ -1024,7 +1024,7 @@ async def query_java_server_direct(host: str, port: int = JAVA_DEFAULT_PORT, tim
         return _pack_varint(len(data)) + data
 
     async def _do_query() -> Dict[str, Any]:
-        # SRV 解析：输入纯域名且未显式指定端口(默认 25565)时, 先查 _minecraft._tcp.<host> 的
+        # SRV 解析: 输入纯域名且未显式指定端口(默认 25565)时, 先查 _minecraft._tcp.<host> 的
         # SRV 记录(与原版客户端一致), 命中则连接 SRV 目标; 握手包仍携带用户输入的原始地址
         connect_host, connect_port = host, port
         if port == JAVA_DEFAULT_PORT and not _is_ip_address(host):
@@ -1074,7 +1074,7 @@ async def query_java_server_direct(host: str, port: int = JAVA_DEFAULT_PORT, tim
         _t0 = time.perf_counter()
         data = await asyncio.wait_for(_do_query(), timeout=timeout)
         if isinstance(data, dict):
-            # 服务器图标：直连 JSON 的 favicon 字段(base64 data URI)
+            # 服务器图标: 直连 JSON 的 favicon 字段(base64 data URI)
             data["icon"] = data.get("icon") or data.get("favicon")
             data["latency_ms"] = round((time.perf_counter() - _t0) * 1000)
             data["source"] = "direct"
@@ -1098,9 +1098,9 @@ async def query_java_server_direct(host: str, port: int = JAVA_DEFAULT_PORT, tim
 
 
 async def query_java_server(host: str, port: int = JAVA_DEFAULT_PORT, timeout: int = 5, use_api: bool = True) -> Dict[str, Any]:
-    """查询 Java 版服务器状态：API 与 TCP 直连并发竞速, 谁先成功用谁(统一死线语义)
+    """查询 Java 版服务器状态: API 与 TCP 直连并发竞速, 谁先成功用谁(统一死线语义)
 
-    - timeout 即本函数的总耗时上限：两支共享同一死线, 各支内部自限
+    - timeout 即本函数的总耗时上限: 两支共享同一死线, 各支内部自限
       (API 为 HTTP total=timeout, 直连为内部 wait_for(timeout)), 无外层总闸、无 ±N 加减; 
     - use_api=False 时仅直连查询; 
     - 直连先成功且协议号 ≤ 0(代理服务器)时, 复用竞速中的 API 任务补全带范围的版本名, 
@@ -1143,7 +1143,7 @@ async def query_java_server(host: str, port: int = JAVA_DEFAULT_PORT, timeout: i
                     version_name = result.get("version", {}).get("name", "")
                     logger.info(f"[MOTD] 直连查询获胜: protocol={proto}, name='{version_name}'")
                     if proto is not None and proto <= 0:
-                        # 代理服务器：等待竞速中的 API 任务补全版本范围(至多到统一死线, 到点放弃补全)
+                        # 代理服务器: 等待竞速中的 API 任务补全版本范围(至多到统一死线, 到点放弃补全)
                     # 审计 F044: 现代 Velocity/BungeeCord 对未知协议返回最新协议号(>0),
                     # 本分支仅服务 ViaVersion 屏蔽标记 -1 等极端场景, 保留兜底
                         logger.info(f"[MOTD] 直连协议号 {proto} ≤ 0, 等待 API 任务补全版本范围(至多到统一死线)")
@@ -1166,7 +1166,7 @@ async def query_java_server(host: str, port: int = JAVA_DEFAULT_PORT, timeout: i
                             logger.info(f"[MOTD] 统一死线已到, 放弃等待 API 补全版本名, 保留直连结果")
                     api_task.cancel()  # 补全等待已结束: 已完成时为 no-op, 仍在飞则中止
                     return _stamp(result)
-                # API 先成功：取消直连任务, 直接采用(直连通常更快, 能被 API 抢先说明直连不可达)
+                # API 先成功: 取消直连任务, 直接采用(直连通常更快, 能被 API 抢先说明直连不可达)
                 direct_task.cancel()
                 logger.info(f"[MOTD] API 查询获胜({result.get('latency_ms')}ms)")
                 return _stamp(result)
@@ -1175,7 +1175,7 @@ async def query_java_server(host: str, port: int = JAVA_DEFAULT_PORT, timeout: i
         direct_task.cancel()
         raise
 
-    # 两支都失败：返回直连的错误信息
+    # 两支都失败: 返回直连的错误信息
     return direct_task.result()
 
 
@@ -1336,7 +1336,7 @@ async def query_sub_servers_direct(sub_servers: list, timeout: int = 5, use_api:
         host = server_info["host"]
         port = server_info["port"]
         try:
-            # 统一死线：query_java_server 内部自限, 无需每服外层总闸
+            # 统一死线: query_java_server 内部自限, 无需每服外层总闸
             result = await query_java_server(host, port, timeout, use_api)
             if "error" in result:
                 return name, None, result['error']
@@ -1368,8 +1368,8 @@ async def query_sub_servers_direct(sub_servers: list, timeout: int = 5, use_api:
 
 
 # ============================================================
-# HTML 模板：MOTD 服务器状态卡片
-# 视觉方向：像素风
+# HTML 模板: MOTD 服务器状态卡片
+# 视觉方向: 像素风
 # ============================================================
 
 
@@ -1403,7 +1403,7 @@ html, body {
     margin: 0; padding: 0;
 }
 body {
-    /* ── 设计 token：MC 调色板 ── */
+    /* ── 设计 token: MC 调色板 ── */
     --green: #55FF55; --green-xp: #7EFC20; --gold: #FFAA00;
     --red: #FF5555; --aqua: #55FFFF;
     --panel: #3F3F3F; --panel-hi: #757575; --panel-lo: #191919;
@@ -1434,7 +1434,7 @@ body {
     flex: 1 0 auto;
 }
 
-/* ── MC GUI 浮雕面板：上左亮 / 下右暗 ── */
+/* ── MC GUI 浮雕面板: 上左亮 / 下右暗 ── */
 .panel {
     background: var(--panel);
     border-style: solid;
@@ -1444,7 +1444,7 @@ body {
     box-sizing: border-box;
     flex: 1 0 auto;
 }
-/* ── 物品栏格子槽：凹陷浮雕(与面板反向) ── */
+/* ── 物品栏格子槽: 凹陷浮雕(与面板反向) ── */
 .slot {
     background: var(--slot);
     border-style: solid;
@@ -1553,7 +1553,7 @@ body {
     margin-top: 6px;
 }
 
-/* ── 聊天框样式 MOTD：半透明黑底 ── */
+/* ── 聊天框样式 MOTD: 半透明黑底 ── */
 .motd-chat {
     background: rgba(0, 0, 0, 0.55);
     border: 2px solid #151515;
@@ -1662,7 +1662,7 @@ body {
     padding: 6px 10px;
 }
 
-/* ── 错误卡：MC 断开连接界面风格 ── */
+/* ── 错误卡: MC 断开连接界面风格 ── */
 .err-body {
     padding: 46px 30px 40px;
     display: flex;
@@ -1699,7 +1699,7 @@ body {
     color: var(--muted);
 }
 
-/* ── 页脚：一行等宽小字 ── */
+/* ── 页脚: 一行等宽小字 ── */
 .foot {
     margin-top: 20px;
     text-align: center;
@@ -1792,7 +1792,7 @@ MOTD_HTML_TEMPLATE = _MOTD_TEMPLATE_SRC.replace("__DIRT_TILE__", _DIRT_TILE)
 
 
 # ============================================================
-# HTML 模板：代理服务器状态卡片(母服 + 子服列表)
+# HTML 模板: 代理服务器状态卡片(母服 + 子服列表)
 # 与主卡片共用同一套设计 token / 泥土背景 / 浮雕面板
 # ============================================================
 
@@ -1805,7 +1805,7 @@ html, body {
     margin: 0; padding: 0;
 }
 body {
-    /* ── 设计 token：与主卡片保持一致 ── */
+    /* ── 设计 token: 与主卡片保持一致 ── */
     --green: #55FF55; --green-xp: #7EFC20; --gold: #FFAA00;
     --red: #FF5555; --aqua: #55FFFF;
     --panel: #3F3F3F; --panel-hi: #757575; --panel-lo: #191919;
@@ -1951,7 +1951,7 @@ body {
     margin-top: 6px;
 }
 
-/* 母服 MOTD：聊天框样式, 限 2 行 */
+/* 母服 MOTD: 聊天框样式, 限 2 行 */
 .motd-chat {
     background: rgba(0, 0, 0, 0.55);
     border: 2px solid #151515;
@@ -2258,7 +2258,7 @@ body {
 PROXY_HTML_TEMPLATE = _PROXY_TEMPLATE_SRC.replace("__DIRT_TILE__", _DIRT_TILE)
 
 
-@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件, 支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "2.4.0")
+@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件, 支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "3.0.0")
 class MOTDPlugin(Star):
     """MOTD 查询插件主类"""
 
@@ -2272,7 +2272,7 @@ class MOTDPlugin(Star):
         # 发送闸门: 串行化「渲染+发送」段, 群聊多人同时查询时不再叠加渲染/上传开销(渲染失败有文本回退, 不会永久占用)
         self._send_semaphore = asyncio.Semaphore(1)
         self._load_config()
-        logger.info(f"[MOTD] 插件初始化完成, 版本 2.4.0")
+        logger.info(f"[MOTD] 插件初始化完成, 版本 3.0.0")
     
     def _load_config(self):
         """加载插件配置"""
@@ -2521,7 +2521,7 @@ class MOTDPlugin(Star):
 
         # ── 5. 构建显示结果 ──
         if is_multi_version:
-            # 多版本兼容服务器：服务器版本用协议号映射, 客户端版本显示支持范围
+            # 多版本兼容服务器: 服务器版本用协议号映射, 客户端版本显示支持范围
             server_version = proto_ver_display or version_in_name or "未知"
             if min_supported_version and max_supported_version and min_supported_version != max_supported_version:
                 client_version = f"{min_supported_version} ~ {max_supported_version}"
@@ -2544,11 +2544,11 @@ class MOTDPlugin(Star):
         # ── 6. 代理/多版本提示 ──
         if is_multi_version:
             if sv_hint_used:
-                via_hint = "检测到: ViaVersion 兼容"
+                via_hint = "ViaVersion"
             elif proxy_name:
-                via_hint = f"检测到: {proxy_name} 代理"
+                via_hint = f"{proxy_name}"
             else:
-                via_hint = "支持多版本客户端连接"
+                via_hint = "多版本客户端"
         else:
             via_hint = ""
 
@@ -2562,7 +2562,7 @@ class MOTDPlugin(Star):
         支持: §0-§f 颜色码、§l/§o/§n/§m 格式码、§r 重置、JSON 组件树(含 extra 递归)
         max_length > 0 时, 超过该字符数的纯文本会被截断(丢弃样式信息)
         """
-        # 长度预检：提取纯文本, 超长则降级为截断后的纯字符串
+        # 长度预检: 提取纯文本, 超长则降级为截断后的纯字符串
         if max_length > 0:
             if isinstance(motd_data, (dict, list)):
                 plain = self._format_motd(motd_data)
@@ -2584,12 +2584,12 @@ class MOTDPlugin(Star):
             html = ""
         if html:
             return html
-        # 空结果兜底：输出转义后的纯文本
+        # 空结果兜底: 输出转义后的纯文本
         fallback = self._format_motd(motd_data) if isinstance(motd_data, (dict, list)) else str(motd_data)
         return _html_escape(fallback or "")
 
     def _base_card_context(self) -> Dict[str, Any]:
-        """构建卡片模板公共上下文(三个分支共用：主卡 / 错误卡 / 代理卡)"""
+        """构建卡片模板公共上下文(三个分支共用: 主卡 / 错误卡 / 代理卡)"""
         return {
             "icon": None,
             "latency_ms": None, "latency_class": "",
@@ -2616,7 +2616,7 @@ class MOTDPlugin(Star):
 
     @staticmethod
     def _latency_class(latency_ms: Optional[int]) -> str:
-        """延迟分级样式：<1000ms 绿 / <3000ms 金 / 其余红"""
+        """延迟分级样式: <1000ms 绿 / <3000ms 金 / 其余红"""
         if latency_ms is None:
             return ""
         if latency_ms < 1000:
@@ -2626,7 +2626,7 @@ class MOTDPlugin(Star):
         return "lat-bad"
 
     def _build_footer_text(self, result: Dict[str, Any], ctx: Dict[str, Any]) -> str:
-        """构建页脚文本：查询延迟 · 数据源 · 时间(按配置开关与数据可用性裁剪)"""
+        """构建页脚文本: 查询延迟 · 数据源 · 时间(按配置开关与数据可用性裁剪)"""
         # 结果中的延迟尚未写入上下文时补写(错误分支等场景)
         if ctx.get("latency_ms") is None and result.get("latency_ms") is not None:
             ctx["latency_ms"] = result.get("latency_ms")
@@ -2645,7 +2645,7 @@ class MOTDPlugin(Star):
     def _emoji(event: AstrMessageEvent, key: str) -> str:
         """按场景返回文本前缀 emoji. 
 
-        全平台统一使用 Unicode emoji(含 QQ 官方平台)：实测 QQ 官方各消息通道
+        全平台统一使用 Unicode emoji(含 QQ 官方平台): 实测 QQ 官方各消息通道
         (markdown/content)均不渲染 <emoji:id> 内嵌格式(前者剥离、后者透传字面量), 
         统一 Unicode 方案保证所有平台显示稳定. event 参数保留以备未来按平台定制. 
         """
@@ -2655,7 +2655,7 @@ class MOTDPlugin(Star):
     def _plain_chain(event: AstrMessageEvent, text: str):
         """构建强制纯文本通道的消息链. 
 
-        AstrBot 默认把文本走 markdown(msg_type=2) 通道发送：无 markdown 权限的
+        AstrBot 默认把文本走 markdown(msg_type=2) 通道发送: 无 markdown 权限的
         机器人会发送失败, 有权限的也会丢失纯文本排版 → 这里强制 use_markdown(False)
         走 content 纯文本通道, Unicode emoji 在该通道显示最稳定. 
         其他平台: plain_result 本就是纯文本, use_markdown(False) 无副作用;
@@ -2672,7 +2672,7 @@ class MOTDPlugin(Star):
 
     async def _send_card_with_fallback(self, event: AstrMessageEvent, template: str,
                                        context: Dict[str, Any], build_text) -> bool:
-        """统一降级发送层：
+        """统一降级发送层: 
         0. output_mode == "text"(低配设备)→ 跳过渲染, 直接发文本; 
         1. 渲染模板并发送图片(发送闸门串行 + 60 秒渲染超时, 云端渲染不可达时不再无限等待); 
         2. 失败 → 发送文本回退(Unicode emoji, 强制 content 纯文本通道); 
@@ -2702,7 +2702,12 @@ class MOTDPlugin(Star):
             return True
         except Exception as e:
             logger.error(f"[MOTD] 图片渲染/发送失败, 回退到文本: {e}")
-        text = build_text(context)
+        try:
+            text = build_text(context)
+        except Exception as e:
+            # 审计 F054: 回退文本构建失败不应让异常逃出统一发送层
+            logger.error(f"[MOTD] 回退文本构建失败: {e}")
+            text = "查询结果构建失败(详见服务端日志)"
         try:
             await asyncio.wait_for(
                 event.send(self._plain_chain(event, text)), timeout=30)
@@ -2712,7 +2717,7 @@ class MOTDPlugin(Star):
         return False
 
     def _resolve_icon(self, result: Dict[str, Any], server_address: str) -> Optional[str]:
-        """服务器图标缓存策略：
+        """服务器图标缓存策略: 
         本次查询带图标 → 写入/刷新磁盘缓存并返回; 
         未带图标 → 回退显示上一次成功获取的缓存图标(图标缓存无 TTL 门限, 永久保留最后成功值; 无则 None, 渲染为首字母占位块)
         """
@@ -2764,7 +2769,7 @@ class MOTDPlugin(Star):
             online = players_info.get("online", 0)
             max_players = players_info.get("max", 0)
             sample = players_info.get("sample", []) or []
-            # 玩家样例列表：最多显示 8 个, 其余计入 +N
+            # 玩家样例列表: 最多显示 8 个, 其余计入 +N
             player_list = []
             for p in sample[:8]:
                 if isinstance(p, dict):
@@ -2865,7 +2870,7 @@ class MOTDPlugin(Star):
 
         server_address = f"{server}:{port}"
 
-        # 发送查询中提示(best-effort：失败不阻塞主查询流程)
+        # 发送查询中提示(best-effort: 失败不阻塞主查询流程)
         try:
             await event.send(self._plain_chain(event,
                 f"{self._emoji(event, 'searching')} 正在查询..."))
@@ -2875,7 +2880,7 @@ class MOTDPlugin(Star):
         # 执行查询
         logger.info(f"[MOTD] 开始执行查询, 超时={self.query_timeout}秒")
         try:
-            # 统一死线：不设外层总闸, 各查询函数内部按 query_timeout 自限并返回错误 dict,
+            # 统一死线: 不设外层总闸, 各查询函数内部按 query_timeout 自限并返回错误 dict,
             # 具体错误信息(如「连接超时, 请检查地址端口」)得以透出, 也不会误杀临界成功结果
             if is_java:
                 result = await query_java_server(server, port, self.query_timeout, self.use_api)
@@ -2957,7 +2962,7 @@ class MOTDPlugin(Star):
 
         proxy_address = f"{proxy_host}:{proxy_port}"
 
-        # 发送查询中提示(best-effort：失败不阻塞主查询流程)
+        # 发送查询中提示(best-effort: 失败不阻塞主查询流程)
         try:
             await event.send(self._plain_chain(event,
                 f"{self._emoji(event, 'proxy')} 正在查询..."))
@@ -2966,7 +2971,7 @@ class MOTDPlugin(Star):
 
         # 先查询代理服务器本身
         try:
-            # 统一死线：query_java_server 内部自限, 无需外层总闸
+            # 统一死线: query_java_server 内部自限, 无需外层总闸
             proxy_result = await query_java_server(proxy_host, proxy_port, self.query_timeout, self.use_api)
         except (asyncio.TimeoutError, Exception) as e:
             proxy_result = {"error": f"代理服务器查询失败: {str(e)}"}
@@ -3156,7 +3161,7 @@ class MOTDPlugin(Star):
         except Exception:
             pass
         
-        # 简单文本检查：如果以 / 开头, 跳过
+        # 简单文本检查: 如果以 / 开头, 跳过
         if message.startswith('/'):
             return
         
@@ -3217,7 +3222,7 @@ class MOTDPlugin(Star):
             yield self._plain_chain(event, f"{self._emoji(event, 'fail')} 只有管理员才能使用此指令")
             return
         
-        # 立即刷新：清空头像/图标磁盘缓存, 下次查询重新下载
+        # 立即刷新: 清空头像/图标磁盘缓存, 下次查询重新下载
         avatar_count, icon_count = clear_disk_cache()
         yield self._plain_chain(event,
             f"{self._emoji(event, 'success')} 缓存已清空, 下次查询将重新下载\n"
@@ -3254,7 +3259,7 @@ class MOTDPlugin(Star):
             yield self._plain_chain(event, f"{self._emoji(event, 'searching')} 正在验证...")
             
             try:
-                # 统一死线：query_java_server 内部自限, 无需外层总闸
+                # 统一死线: query_java_server 内部自限, 无需外层总闸
                 result = await query_java_server(server, port, self.query_timeout, self.use_api)
             except asyncio.TimeoutError:
                 result = {"error": "验证超时"}
@@ -3325,7 +3330,7 @@ class MOTDPlugin(Star):
     async def on_astrbot_loaded(self):
         """Bot 初始化完成时"""
         logger.info("=" * 50)
-        logger.info("[MOTD] 插件已加载 v2.4.0")
+        logger.info("[MOTD] 插件已加载 v3.0.0")
         logger.info("[MOTD] 支持 ViaVersion/Velocity/BungeeCord 多版本兼容")
         logger.info(f"[MOTD] 默认服务器: {self.default_server}:{self.default_port if self.default_server else '未设置'}")
         logger.info(f"[MOTD] 查询类型: {self.query_type}")
@@ -3342,6 +3347,6 @@ class MOTDPlugin(Star):
         logger.info("=" * 50)
 
     async def terminate(self):
-        """插件被禁用/重载时释放资源：关闭共享 HTTP 会话"""
+        """插件被禁用/重载时释放资源: 关闭共享 HTTP 会话"""
         await _close_http_session()
         logger.info("[MOTD] 插件已卸载, 共享 HTTP 会话已关闭")
