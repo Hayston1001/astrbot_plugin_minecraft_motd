@@ -806,14 +806,11 @@ async def query_java_server_api(host: str, port: int = JAVA_DEFAULT_PORT, *, tim
 # 与原版客户端行为一致: 输入纯域名且未显式指定端口(默认 25565)时, 
 # 先查询 _minecraft._tcp.<host> 的 SRV 记录, 命中则按 target:port 建立连接, 
 # 握手包仍携带用户输入的原始地址; 查不到或查询失败则回退直连 A 记录. 
-# 正/负结果均缓存(TTL 取 DNS 应答值, 夹在 60~3600 秒, 负结果固定 300 秒), 
-# 查询失败时沿用已过期的旧缓存(TTL 仅作刷新周期, 与头像缓存哲学一致). 
+# 结果不做缓存: 每次直连查询都实时发起 SRV 解析, 避免 DNS 记录变更后的时效问题. 
 # ============================================================
 # 审计 F016: 直连状态响应 JSON 字节数上限(带 favicon 的真实响应通常 < 64KB)
 STATUS_JSON_MAX_BYTES = 128 * 1024
 SRV_LOOKUP_TIMEOUT = 1.5   # 单个 DNS 解析器的 UDP 超时(秒, 多解析器并发竞速取最快者)
-SRV_NEG_TTL_SECONDS = 300  # 无 SRV 记录(负结果)的缓存时长(秒)
-_SRV_CACHE: Dict[str, Tuple[Optional[str], int, float]] = {}  # host -> (target 或 None, port, 过期时间戳)
 _SRV_RESOLVERS_CACHE: List[str] = []                          # 解析器列表进程内缓存(懒加载, 避免新增导入期副作用)
 
 
@@ -877,10 +874,10 @@ def _dns_read_name(data: bytes, offset: int) -> Tuple[str, int]:
     return ".".join(labels), end
 
 
-def _srv_query_sync(host: str, resolver: str, timeout: float) -> Tuple[int, List[Tuple[int, int, int, str]], int]:
+def _srv_query_sync(host: str, resolver: str, timeout: float) -> Tuple[int, List[Tuple[int, int, int, str]]]:
     """向单个 DNS 解析器发起 SRV 查询(同步 UDP, 经 asyncio.to_thread 调用, 不阻塞事件循环)
 
-    返回 (rcode, 记录列表, TTL 秒), 记录元素为 (priority, weight, port, target). 
+    返回 (rcode, 记录列表), 记录元素为 (priority, weight, port, target). 
     rcode 3(NXDOMAIN) 与 0(NOERROR) 都是明确答案; 报文解析异常按空结果处理; 
     网络层异常(超时/不可达)原样抛出, 由调用方竞速等待其余解析器. 
     """
@@ -910,7 +907,6 @@ def _srv_query_sync(host: str, resolver: str, timeout: float) -> Tuple[int, List
             rcode = flags & 0x000F
             offset = 12
             records: List[Tuple[int, int, int, str]] = []
-            ttl_min = 3600
             try:
                 for _ in range(qdcount):           # 跳过 Question 区
                     _name, offset = _dns_read_name(data, offset)
@@ -919,17 +915,16 @@ def _srv_query_sync(host: str, resolver: str, timeout: float) -> Tuple[int, List
                     _name, offset = _dns_read_name(data, offset)
                     if offset + 10 > len(data):
                         break
-                    rtype, _rclass, ttl, rdlength = struct.unpack(">HHIH", data[offset:offset + 10])
+                    rtype, _rclass, _ttl, rdlength = struct.unpack(">HHIH", data[offset:offset + 10])
                     offset += 10
                     if rtype == 33 and rdlength >= 6:  # 只关心 SRV 记录
                         priority, weight, port = struct.unpack(">HHH", data[offset:offset + 6])
                         target, _ = _dns_read_name(data, offset + 6)   # target 可能用压缩指针指向报文其他位置
                         records.append((priority, weight, port, target))
-                        ttl_min = min(ttl_min, max(ttl, 60))
                     offset += rdlength
-                return rcode, records, (ttl_min if records else SRV_NEG_TTL_SECONDS)
+                return rcode, records
             except ValueError:
-                return rcode, [], SRV_NEG_TTL_SECONDS
+                return rcode, []
     finally:
         sock.close()
 
@@ -938,14 +933,8 @@ async def _resolve_minecraft_srv(host: str) -> Optional[Tuple[str, int]]:
     """查询 _minecraft._tcp.<host> SRV 记录, 返回 (target, port); 无记录或失败返回 None(调用方回退直连 A 记录)
 
     多解析器并发竞速, 谁先给出明确答案(NXDOMAIN/NOERROR)用谁——与 Java 查询的 API/直连竞速同款模式; 
-    正/负结果均写缓存; 全部解析器失败时沿用已过期的旧缓存(TTL 仅作刷新周期). 
+    不做任何缓存: 每次调用都实时发起 DNS 解析, 保证 SRV 记录变更即时生效. 
     """
-    now = time.monotonic()  # 审计 F041: 单调时钟(内存缓存 TTL)
-    cached = _SRV_CACHE.get(host)
-    if cached and cached[2] > now:
-        return (cached[0], cached[1]) if cached[0] else None       # 缓存命中(含负缓存)
-    stale = (cached[0], cached[1]) if cached and cached[0] else None
-
     # 审计 F042: 多解析器并发经默认线程池执行, 峰值占用 5 线程 × 至多 1.5s;
     # 窗口短且受控, 不引入专用线程池(避免额外复杂度)
     task_resolver = {}
@@ -954,7 +943,6 @@ async def _resolve_minecraft_srv(host: str) -> Optional[Tuple[str, int]]:
         task_resolver[t] = r
     pending = set(task_resolver)
     srv: Optional[Tuple[str, int]] = None
-    ttl = SRV_NEG_TTL_SECONDS
     definitive = False
     # 审计 F015: 外层协程被取消时, finally 保证全部解析器任务被回收, 不留孤儿任务
     try:
@@ -962,14 +950,13 @@ async def _resolve_minecraft_srv(host: str) -> Optional[Tuple[str, int]]:
             done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 try:
-                    rcode, records, rec_ttl = task.result()
+                    rcode, records = task.result()
                 except Exception as e:                 # 单个解析器超时/不可达, 竞速等待其余解析器
                     logger.info(f"[MOTD] SRV 查询解析器 {task_resolver[task]} 失败: {e}")
                     continue
                 if rcode not in (0, 3):                # SERVFAIL 等不算明确答案, 竞速等待其余解析器
                     continue
                 definitive = True
-                ttl = rec_ttl
                 if rcode == 0 and records:
                     priority, weight, port, target = sorted(records, key=lambda rec: (rec[0], -rec[1]))[0]
                     target = target.rstrip(".").lower()
@@ -979,19 +966,13 @@ async def _resolve_minecraft_srv(host: str) -> Optional[Tuple[str, int]]:
     finally:
         for task in pending:
             task.cancel()
-        task.cancel()
 
     if not definitive:
-        if stale:      # 全部解析器失败, 沿用旧缓存(TTL 仅作刷新周期)
-            logger.info(f"[MOTD] SRV 查询全部失败, 沿用旧缓存: {host} -> {stale[0]}:{stale[1]}")
-            return stale
         return None
     if srv:
-        _put_capped(_SRV_CACHE, host, (srv[0], srv[1], time.monotonic() + ttl))     # ttl 已夹在 60~3600 秒, 单调时钟(审计 F041)
-        logger.info(f"[MOTD] SRV 解析成功: {host} -> {srv[0]}:{srv[1]} (缓存 {ttl}s)")
+        logger.info(f"[MOTD] SRV 解析成功: {host} -> {srv[0]}:{srv[1]}")
     else:
-        _put_capped(_SRV_CACHE, host, (None, 0, time.monotonic() + SRV_NEG_TTL_SECONDS))
-        logger.info(f"[MOTD] 无 SRV 记录, 直连 A 记录: {host} (负缓存 {SRV_NEG_TTL_SECONDS}s)")
+        logger.info(f"[MOTD] 无 SRV 记录, 直连 A 记录: {host}")
     return srv
 
 
