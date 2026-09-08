@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.1.0
+
+- 查询策略调整: API(mcstatus.io)不再与 TCP 直连并发竞速, 改为仅作直连失败后的兜底. API 回退仅获得死线剩余部分, 总耗时仍被 query_timeout 限制
+- `motd-bedrock` 命令现提供短别名 `motdb`
+- 修复斜杠指令不可达(F011): 五个斜杠处理器改用 `_is_slash_message()` 判定
+- 去除 SRV 缓存
+
 ## v3.0.0
 
 > 本次版本为安全与可靠性大版本, 源自对 v2.4.0 的全量审计

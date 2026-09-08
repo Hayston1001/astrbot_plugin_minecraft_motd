@@ -2,7 +2,7 @@
 
 # MC 服务器状态查询(AstrBot MOTD 查询插件)
 
-一个用于查询 Minecraft 服务器状态的 AstrBot 插件. 支持 Java 版和基岩版服务器, **兼容 ViaVersion 多版本服务器**, **支持 Velocity 代理子服查询**
+默认直连查询; 支持图片渲染/文本输出; 支持 Java/基岩; 兼容 ViaVersion; 支持代理子服查询
 
 ![插件输出图片效果预览图1](https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/assets/preview_java.png)
 ![插件输出图片效果预览图2](https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/assets/preview_bedrock.png)
@@ -10,7 +10,8 @@
 
 ## 功能特性
 
-- **MOTD 查询**: 查询 Minecraft 服务器的 MOTD、在线玩家、版本等信息
+- **无需斜杠**: 直接输入 `motd` 即可, 无需 `/`
+- **直连查询**: 支持失败回退 API 查询
 - **支持 SRV**: 直连查询自动解析 SRV 记录(与原版客户端行为一致), 显式指定端口时不查询 SRV(v2.4+)
 - **像素风卡片**: 泥土纹理背景 + MC GUI 浮雕面板 + 物品栏格子槽 + XP 条式玩家进度条(v2+)
 - **MOTD 还原**: 支持颜色码/格式码/JSON 组件树(v2+)
@@ -19,7 +20,6 @@
 - **双平台支持**: 同时支持 Java 版和基岩版服务器查询
 - **ViaVersion 兼容**: 正确识别 ViaVersion 多版本(`send-supported-versions: true`)(v3+)
 - **代理服务器查询**: 支持查询 Velocity 代理及其子服状态
-- **无需斜杠触发**: 直接输入 `motd` 即可触发, 无需 `/` 前缀
 - **默认服务器**: 可配置默认查询的服务器, 简化指令使用
 - **头像/图标磁盘缓存**: 头像默认 12 小时刷新周期(可配置), 刷新失败自动沿用旧缓存；图标保留最后一次成功获取的值；重启不丢, `/motdr` 立即刷新(v2.1+)
 - **离线玩家识别**: 自动识别离线玩家 UUID 并跳过头像下载(v2.2+)
@@ -112,13 +112,13 @@
 | `enable_all_sessions` | 对所有会话生效 | true |
 | `enabled_sessions` | 会话白名单(关闭"对所有会话生效"后生效, 填会话 ID, 可用 `/sid` 获取) | `[]` |
 | `admin_only_config` | 仅管理员可修改本插件配置(影响 `/motdconfig` 指令) | true |
-| `use_api` | 调用 API 并发查询, 部分情况下可互补 | true |
+| `use_api` | 直连失败后兜底: 回退调用 mcstatus.io API | true |
 | `output_mode` | 输出模式: `image` 渲染像素风图片卡片 / `text` 纯文本(跳过渲染与头像预取, 几乎零开销) | `image` |
 | `card_height_mode` | 卡片高度: `auto` 随内容自适应(紧凑无留白) / `fixed` 固定高度 720px(玩家少时补白, 尺寸统一) | `auto` |
 | `show_server_icon` | 显示服务器图标 | true |
 | `show_player_list` | 显示在线玩家列表 | true |
 | `show_latency` | 显示查询延迟 | true |
-| `query_timeout` | 查询总超时时间(秒), 所有查询方式共享同一死线, 超时的分支返回各自的具体错误 | `5` |
+| `query_timeout` | 查询总超时时间(秒), 单次查询的总死线 | `5` |
 | `prefetch_avatars` | 预取玩家头像并内嵌渲染图(带磁盘缓存) | true |
 | `avatar_cache_ttl` | 头像刷新周期(小时), 过期后尝试重新下载, 失败继续用旧缓存 | `12` |
 | `avatar_neg_cache_ttl` | 头像负缓存(分钟), 失败后该时长内不再重试下载; 0 为关闭 | `30` |
@@ -204,6 +204,8 @@
 | `motd <地址:端口>` | 查询指定服务器(使用指定端口) | `motd n.rainplay.cn:46861` |
 | `motd-bedrock` | 查询默认基岩版服务器 | `motd-bedrock` |
 | `motd-bedrock <地址:端口>` | 查询指定基岩版服务器 | `motd-bedrock mc.example.com:19132` |
+| `motdb` | 查询默认基岩版服务器(`motd-bedrock` 的短别名) | `motdb` |
+| `motdb <地址:端口>` | 查询指定基岩版服务器(`motd-bedrock` 的短别名) | `motdb mc.example.com:19132` |
 
 ### 带斜杠前缀的指令
 
@@ -211,6 +213,7 @@
 |------|------|
 | `/motd [地址:端口]` | Java 版服务器查询 |
 | `/motd-bedrock [地址:端口]` | 基岩版服务器查询 |
+| `/motdb [地址:端口]` | 基岩版服务器查询(`/motd-bedrock` 的短别名) |
 
 ### 管理员配置指令
 
@@ -299,7 +302,7 @@
 ### 问题：查询超时或连接被拒绝？
 
 1. 确认服务器地址和端口是否正确
-2. 保持 `use_api: true`(默认开启)开启 API 竞速查询(API 与直连并发, 谁先成功用谁, 共享 query_timeout 死线)
+2. 保持 `use_api: true`(默认开启)开启 API 失败回退(直连查询失败时自动回退调用 mcstatus.io API, 直连被墙/被过滤的外服也可获取状态)
 3. 增加 `query_timeout` 配置值
 4. 检查服务器是否在线
 5. 检查 AstrBot 运行的网络环境
@@ -323,7 +326,7 @@
 [MOTD] 配置加载: default_server='xxx', port=25565
 [MOTD] 查询类型: normal/proxy
 [MOTD] 代理查询方式: velostat/direct
-[MOTD] 使用 API 查询: True
+[MOTD] API 失败回退(直连失败时兜底): 开启
 [MOTD] 头像预取: 开启, 头像刷新周期 12 小时, 下载失败负缓存 10 分钟, 图标缓存保留最后一次成功获取
 [MOTD] 插件已加载 vX.X.X
 ```
