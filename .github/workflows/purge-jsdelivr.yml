@@ -1,0 +1,48 @@
+name: Purge jsDelivr cache
+
+# README 图片经 jsDelivr 分发: @main 分支 URL 最长缓存 24h。
+# 推送后自动 purge, 免去手动刷新
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'logo.png'
+      - 'assets/**'
+
+permissions: {}
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Purge jsDelivr CDN cache
+        # 与 README 中的 jsDelivr 图片一一对应
+        run: |
+          BASE="https://purge.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main"
+          FILES=(
+            "logo.png"
+            "assets/preview_java.png"
+            "assets/preview_bedrock.png"
+            "assets/preview_proxy.png"
+          )
+          FAILED=0
+          for f in "${FILES[@]}"; do
+            echo "Purging ${f} ..."
+            if ! RESPONSE="$(curl -fsS --retry 3 --retry-delay 2 "${BASE}/${f}")"; then
+              echo "::warning::purge ${f} 请求失败"
+              FAILED=1
+              continue
+            fi
+            STATUS="$(printf '%s' "${RESPONSE}" | grep -o '"status": *"[^"]*"' | head -n1 | cut -d'"' -f4)"
+            THROTTLED="$(printf '%s' "${RESPONSE}" | grep -o '"throttled": *true' | head -n1)"
+            echo "  ${f}: status=${STATUS:-unknown}"
+            if [ "${STATUS}" != "finished" ] || [ -n "${THROTTLED}" ]; then
+              echo "::warning::purge ${f} 未生效: ${RESPONSE}"
+              FAILED=1
+            fi
+          done
+          if [ "${FAILED}" != "0" ]; then
+            echo "::error::存在未生效的 purge, 请检查上方警告"
+          fi
+          exit ${FAILED}

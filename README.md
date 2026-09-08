@@ -1,12 +1,13 @@
-<p align="center"><img src="https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/logo.png" width="96" alt="logo"></p>
+<p align="center"><img src="https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/logo.png?v=1" width="96" alt="logo"></p>
 
 # MC 服务器状态查询(AstrBot MOTD 查询插件)
 
 默认直连查询; 支持图片渲染/文本输出; 支持 Java/基岩; 兼容 ViaVersion; 支持代理子服查询
 
-![插件输出图片效果预览图1](https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/assets/preview_java.png)
-![插件输出图片效果预览图2](https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/assets/preview_bedrock.png)
-![插件输出图片效果预览图3](https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/assets/preview_proxy.png)
+<!-- 随图片同步更新cache buster ?v=版本 -->
+![插件输出图片效果预览图1](https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/assets/preview_java.png?v=1)
+![插件输出图片效果预览图2](https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/assets/preview_bedrock.png?v=1)
+![插件输出图片效果预览图3](https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/assets/preview_proxy.png?v=1)
 
 ## 功能特性
 
