@@ -242,8 +242,8 @@
    - 确认 `enable_all_sessions` 为 true
 
 3. **检查日志级别**
-   - 在 `data/cmd_config.json` 中设置 `"log_level": "DEBUG"`
-   - 重启后发送 motd 查询, 查看是否有 `[MOTD] 匹配到 motd 指令`(无斜杠)或 `[MOTD] 收到 /motd 指令`(斜杠)的日志
+   - INFO 级别下发送 motd 查询, 应看到成对的 `[MOTD] 开始查询: ...` 与 `[MOTD] 查询完成: ...`; 没有则说明指令未被触发
+   - 指令路由细节(如 `[MOTD] 匹配到 motd 指令`、`[MOTD] 收到 /motd 指令`)为 DEBUG 级别, 在 `data/cmd_config.json` 中设置 `"log_level": "DEBUG"` 并重启后可见
 
 4. **检查白名单**
    - 如果关闭了"对所有会话生效", 需要将会话 ID(不是 QQ 号)加入 `enabled_sessions` 白名单, 会话 ID 可用 `/sid` 指令获取
@@ -255,34 +255,28 @@
 ### 问题：ViaVersion 服务器版本显示异常？
 
 本插件已内置 ViaVersion 兼容性处理：
-- 自动检测 `protocol.version = -1/0` 的多版本模式
-- 从 `version.name` 提取版本范围
+- 版本名原样展示, 代理/多版本识别靠四条名称启发式(代理软件关键词、范围格式、多版本列举、`supportedVersions` 协议号数组经映射表翻译)
 - 支持 Paper/Spigot/Bukkit/Purpur 等常见服务端
 - 支持 Velocity/BungeeCord/Waterfall 等代理软件
 
 **排查步骤：**
 
-1. **查看版本解析日志**
-   - 在 AstrBot 日志中搜索 `[MOTD] 版本解析输入`
-   - 日志会显示完整的解析链路：
+1. **查看版本解析日志(DEBUG 级别)**
+   - 在 `data/cmd_config.json` 中设置 `"log_level": "DEBUG"` 并重启, 发送查询后在日志中搜索 `[MOTD] 版本解析输出`
+   - DEBUG 日志会显示完整的解析链路：
      ```
-     [MOTD] API 返回原始数据: version.name_raw='...', version.protocol=null
-     [MOTD] 版本解析输入: name='...', protocol_raw=..., protocol=...
+     [MOTD] API 返回原始数据: version.name_raw='Velocity 1.7.2-1.21.4', version.name_clean='...', version.name='...', version.protocol=null
      [MOTD] 代理检测命中: 'velocity' -> Velocity
-     [MOTD] 版本范围解析: all_versions=['1.8', '1.21.4'], mc_versions=['1.8', '1.21.4']
-     [MOTD] 版本解析输出: server='1.8.x', client='1.8 ~ 1.21.4', via_hint='检测到: Velocity 代理'
+     [MOTD] 版本范围解析: all_versions=['1.7.2', '1.21.4'], sv=[], mc_versions=['1.7.2', '1.21.4']
+     [MOTD] 版本解析输出: server='Velocity 1.7.2-1.21.4', client='1.7.2 ~ 1.21.4', via_hint='Velocity', is_multi_version=True, detect_reason='关键词匹配: velocity'
      ```
 
-2. **检查协议号来源**
-   - 如果看到 `protocol_raw=null`, 表示 API 未返回协议号
-   - 插件会自动从版本名反查或使用直连查询补全
-
-3. **检查代理检测结果**
-   - 如果服务器使用代理软件, 日志会显示 `代理检测命中`
+2. **检查代理检测结果**
+   - 如果服务器使用代理软件, DEBUG 日志会显示 `代理检测命中` 或 `多版本检测命中 supportedVersions`
    - 支持的代理：Velocity、BungeeCord、Waterfall、FlameCord、Geyser 等
 
-4. **反馈问题时请提供**
-   - 完整的 `[MOTD]` 相关日志
+3. **反馈问题时请提供**
+   - DEBUG 级别下完整的 `[MOTD]` 相关日志
    - 服务器地址和端口
    - 服务器使用的代理软件(如有)
 
@@ -318,84 +312,81 @@
 
 ## 日志解读指南
 
-插件输出的所有日志都以 `[MOTD]` 为前缀, 以下是关键日志的含义：
+插件输出的所有日志都以 `[MOTD]` 为前缀, 按级别分层：
 
-### 启动日志
+- **INFO**: 精简主干, 每次查询通常只有「开始查询 + 查询完成」两条(发生直连失败回退 API 或代理子服查询时, 另加对应行)
+- **DEBUG**: 详细诊断(指令路由、SRV 解析、版本解析链路、原始数据等), 默认不显示; 在 `data/cmd_config.json` 中设置 `"log_level": "DEBUG"` 并重启后可见
+- **WARNING**: 可自动恢复的降级(缓存写入失败、畸形数据丢弃等)
+- **ERROR**: 最终失败(发送失败、查询异常等, 附完整堆栈)
+
+### 启动日志(INFO)
 
 ```
 [MOTD] 插件初始化完成, 版本 X.X.X
-[MOTD] 配置加载: default_server='xxx', port=25565
-[MOTD] 查询类型: normal/proxy
-[MOTD] 代理查询方式: velostat/direct
-[MOTD] API 失败回退(直连失败时兜底): 开启
-[MOTD] 头像预取: 开启, 头像刷新周期 12 小时, 下载失败负缓存 10 分钟, 图标缓存保留最后一次成功获取
-[MOTD] 插件已加载 vX.X.X
+[MOTD] 插件已加载 vX.X.X(Java/基岩 MOTD 查询, ViaVersion/Velocity/BungeeCord 多版本兼容)
+[MOTD] 配置摘要: 默认服务器=xxx:25565, 查询类型=normal, 超时=5s, 输出模式=图片, API回退=开, 头像预取=开, 生效范围=全部会话
+[MOTD] 代理模式: 方式=velostat, 详情=http://代理IP:8080      # 仅 query_type=proxy 时输出
 ```
 
-### 查询流程日志
+### 查询流程日志(INFO)
 
 ```
-[MOTD] 匹配到 motd 指令: motd mc.example.com    # 触发查询
-[MOTD] 开始查询: server='mc.example.com', is_java=True
+[MOTD] 开始查询: server='mc.example.com', is_java=True, 超时=5s, 会话=aiocqhttp:GroupMessage:123456
+[MOTD] 查询完成: source=direct, 版本=1.21.11, 玩家=10/100, 图标=有, 耗时=123ms   # source=direct/api 标明数据来源
+```
+
+直连失败触发 API 回退时, 两条之间会出现回退链 INFO:
+
+```
+[MOTD] 直连失败(连接被拒绝), 回退 API 查询(剩余死线 3.2s)
+[MOTD] API 回退成功(823ms)
+```
+
+### 代理查询日志(INFO)
+
+```
+[MOTD] 开始代理查询: method=velostat, server='proxy.example.com', 超时=5s
+[MOTD] 子服查询汇总: 成功 3 个, 失败/异常 0 条
+```
+
+### 管理操作日志(INFO)
+
+```
+[MOTD] 收到 /motdr 指令
+[MOTD] 手动清空缓存(/motdr): 玩家头像 12 个, 服务器图标 3 个, 会话=...
+[MOTD] 收到 /motdconfig 指令: action=default, value=...
+[MOTD] 配置已保存: mc.example.com:25565
+```
+
+### 诊断细节日志(DEBUG)
+
+```
+[MOTD] 匹配到 motd 指令: motd mc.example.com              # 无斜杠指令路由
+[MOTD] 收到 /motd 指令: server='mc.example.com'           # 斜杠指令路由
 [MOTD] 使用指定服务器: mc.example.com:25565
-[MOTD] 开始执行查询, 超时=5秒
-[MOTD] 查询完成: source=direct, 版本=1.21.11, 玩家=10/100, 图标=有, 耗时=123ms   # 关键字段摘要
-[MOTD] 头像预取完成: 4/4 个                            # 预取的玩家头像数(命中缓存则瞬间完成)
-[MOTD] 查询流程完成
-```
-
-### 代理查询日志
-
-```
-[MOTD] 开始代理查询: method=velostat, server='proxy.example.com'
-[MOTD] 代理查询流程完成
-```
-
-### 版本解析日志(关键)
-
-```
-# 1. API 返回的原始数据
-[MOTD] API 返回原始数据: version.name_raw='Velocity 1.7.2-1.21.4', version.protocol=null
-
-# 2. 版本解析输入
-[MOTD] 版本解析输入: name='Velocity 1.7.2-1.21.4', protocol_raw=null, protocol=0
-
-# 3. 协议号处理
-[MOTD] 协议号无效(0), 从版本名 'Velocity 1.7.2-1.21.4' 反查到协议 47
-[MOTD] 协议号映射: 47 -> display='1.8.x', major='1.8'
-
-# 4. 代理检测
+[MOTD] SRV 解析成功: mc.example.com -> play.example.com:25565
+[MOTD] API 返回原始数据: version.name_raw='...', version.protocol=...
 [MOTD] 代理检测命中: 'velocity' -> Velocity
-
-# 5. 版本范围解析
-[MOTD] 版本范围解析: all_versions=['1.7.2', '1.21.4'], mc_versions=['1.7.2', '1.21.4']
-
-# 6. 最终输出
-[MOTD] 版本解析输出: server='1.8.x', client='1.7.2 ~ 1.21.4', via_hint='检测到: Velocity 代理'
+[MOTD] 版本范围解析: all_versions=['1.7.2', '1.21.4'], sv=[], mc_versions=['1.7.2', '1.21.4']
+[MOTD] 版本解析输出: server='Velocity 1.7.2-1.21.4', client='1.7.2 ~ 1.21.4', via_hint='Velocity', is_multi_version=True, detect_reason='关键词匹配: velocity'
+[MOTD] Java 版原始数据: version={...}, players=10/100, 样例(前8)=[...]
+[MOTD] 格式化结果: server_version='...', client_version='...', players=10/100, via_hint='...'
+[MOTD] 头像预取完成: 4/4 个
 ```
 
-### 格式化结果日志
+### 错误与降级日志(WARNING/ERROR)
 
 ```
-[MOTD] Java 版原始数据: version={...}, players={...}
-[MOTD] 格式化结果: server_version='1.8.x', client_version='1.7.2 ~ 1.21.4', players=10/100
+[MOTD] 子服配置解析失败: ... (错误原因)                   # WARNING: 配置写错, 其余子服照常解析
+[MOTD] 服务器上报图标未通过校验, 已丢弃: ...              # WARNING: 畸形/恶意图标, 自动丢弃
+[MOTD] MOTD 组件树解析失败, 降级纯文本: ...               # WARNING: 畸形描述, 渲染为纯文本
+[MOTD] 玩家头像预取失败(不影响查询结果): ...              # WARNING
+[MOTD] 查询完成(失败): 连接超时, 请检查服务器地址和端口是否正确   # INFO: 服务器离线属预期失败
+[MOTD] 查询超时(>5s): mc.example.com:25565                # ERROR
+[MOTD] 查询异常: mc.example.com:25565 ...                 # ERROR: 附完整堆栈
+[MOTD] 图片渲染/发送失败, 回退到文本: ...                 # ERROR: 第一级降级, 自动改发文本卡片
+[MOTD] 文本回退发送失败(放弃): ...                        # ERROR: 文本也失败, 仅记日志, 不阻塞主流程
 ```
-
-### 错误与降级日志
-
-```
-[MOTD] 竞速查询一支失败(...), 等待另一支              # 竞速中 API 或直连一支失败, 自动等另一支
-[MOTD] 直连查询获胜: protocol=767, name='1.21'          # 直连先返回
-[MOTD] API 查询获胜(823ms)                            # API 先返回
-[MOTD] 玩家头像获取失败(渲染时用占位块回退): xxx       # 头像三源均失败, 不影响卡片
-[MOTD] 查询超时
-[MOTD] 查询异常: ...
-[MOTD] 查询中提示发送失败(已忽略): ...           # 「查询中」提示发送失败, 不影响主查询
-[MOTD] 图片渲染/发送失败, 回退到文本: ...          # 第一级降级：发送文本卡片
-[MOTD] 文本回退发送失败(放弃): ...               # 文本也失败, 仅记日志, 不阻塞主流程
-[MOTD] 统一死线已到, 放弃等待 API 补全版本名, 保留直连结果   # 代理服直连先成功但 API 未在死线内补全版本名
-```
-
 ## 许可证
 
 MIT License

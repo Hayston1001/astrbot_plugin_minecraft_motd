@@ -587,7 +587,7 @@ async def get_player_avatars(players: list, ttl_hours: float = AVATAR_TTL_HOURS_
         todo[key] = (uuid, name)
 
     if offline_names:
-        logger.info(f"[MOTD] 检测到离线模式玩家(盗版服 UUID), 跳过头像下载: {', '.join(offline_names)}")
+        logger.debug(f"[MOTD] 检测到离线模式玩家(盗版服 UUID), 跳过头像下载: {', '.join(offline_names)}")
 
     if not todo:
         return result
@@ -603,11 +603,9 @@ async def get_player_avatars(players: list, ttl_hours: float = AVATAR_TTL_HOURS_
                         _cache_write(cache_dir / f"{_safe_filename(key)}.png", data)
                     return
             _put_capped(_NEG_CACHE, key, time.monotonic())  # 审计 F039: 单调时钟
-        if key in result:
-            logger.info(f"[MOTD] 玩家头像刷新失败, 继续使用旧缓存: {name}")
-        else:
-            logger.info(f"[MOTD] 玩家头像获取失败(渲染时用占位块回退): {name}")
-
+        # 三源均失败才走到这里(成功路径在块内 return); 磁盘有旧缓存时下次读取自动沿用,
+        # 故不再区分"刷新失败/首次失败"——旧实现"继续使用旧缓存"分支实际不可达
+        logger.debug(f"[MOTD] 玩家头像三源均下载失败(沿用旧缓存或渲染用占位块): {name}")
     # 并发拉取(最多 _AVATAR_FETCH_SEM 路同时在飞); 整体限时, 超时的玩家沿用旧缓存/占位块, 已完成的正常缓存
     try:
         await asyncio.wait_for(
@@ -670,7 +668,7 @@ async def query_java_server_api(host: str, port: int = JAVA_DEFAULT_PORT, *, tim
                     version_name_raw = version_data.get("name_raw") or version_data.get("name_clean") or version_data.get("name", "")
                     protocol_raw = version_data.get("protocol")
 
-                    logger.info(f"[MOTD] API 返回原始数据: version.name_raw='{version_data.get('name_raw')}', "
+                    logger.debug(f"[MOTD] API 返回原始数据: version.name_raw='{version_data.get('name_raw')}', "
                                 f"version.name_clean='{version_data.get('name_clean')}', "
                                 f"version.name='{version_data.get('name')}', "
                                 f"version.protocol={protocol_raw}")
@@ -859,7 +857,7 @@ async def _resolve_minecraft_srv(host: str) -> Optional[Tuple[str, int]]:
                 try:
                     rcode, records = task.result()
                 except Exception as e:                 # 单个解析器超时/不可达, 竞速等待其余解析器
-                    logger.info(f"[MOTD] SRV 查询解析器 {task_resolver[task]} 失败: {e}")
+                    logger.debug(f"[MOTD] SRV 查询解析器 {task_resolver[task]} 失败: {e}")
                     continue
                 if rcode not in (0, 3):                # SERVFAIL 等不算明确答案, 竞速等待其余解析器
                     continue
@@ -877,9 +875,9 @@ async def _resolve_minecraft_srv(host: str) -> Optional[Tuple[str, int]]:
     if not definitive:
         return None
     if srv:
-        logger.info(f"[MOTD] SRV 解析成功: {host} -> {srv[0]}:{srv[1]}")
+        logger.debug(f"[MOTD] SRV 解析成功: {host} -> {srv[0]}:{srv[1]}")
     else:
-        logger.info(f"[MOTD] 无 SRV 记录, 直连 A 记录: {host}")
+        logger.debug(f"[MOTD] 无 SRV 记录, 直连 A 记录: {host}")
     return srv
 
 
@@ -1011,7 +1009,7 @@ async def query_java_server(host: str, port: int = JAVA_DEFAULT_PORT, timeout: i
     direct_result = await query_java_server_direct(host, port, timeout)
     if "error" not in direct_result:
         # 直连成功: 立即返回, 不发起任何 API 请求
-        logger.info(f"[MOTD] 直连查询成功: name='{direct_result.get('version', {}).get('name', '')}'")
+        logger.debug(f"[MOTD] 直连查询成功: name='{direct_result.get('version', {}).get('name', '')}'")
         return _stamp(direct_result)
 
     if not use_api:
@@ -2113,7 +2111,7 @@ body {
 PROXY_HTML_TEMPLATE = _PROXY_TEMPLATE_SRC.replace("__DIRT_TILE__", _DIRT_TILE)
 
 
-@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件, 支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "3.1.0")
+@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件, 支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "3.2.0")
 class MOTDPlugin(Star):
     """MOTD 查询插件主类"""
 
@@ -2127,7 +2125,7 @@ class MOTDPlugin(Star):
         # 发送闸门: 串行化「渲染+发送」段, 群聊多人同时查询时不再叠加渲染/上传开销(渲染失败有文本回退, 不会永久占用)
         self._send_semaphore = asyncio.Semaphore(1)
         self._load_config()
-        logger.info(f"[MOTD] 插件初始化完成, 版本 3.1.0")
+        logger.info(f"[MOTD] 插件初始化完成, 版本 3.2.0")
     
     def _load_config(self):
         """加载插件配置"""
@@ -2169,9 +2167,9 @@ class MOTDPlugin(Star):
         self.velostat_api_url = self.config.get("velostat_api_url", "")
         self.sub_servers_config = self.config.get("sub_servers", "")
 
-        logger.info(f"[MOTD] 配置加载: default_server='{self.default_server}', port={self.default_port}")
-        logger.info(f"[MOTD] 查询类型: {self.query_type}, 代理查询方式: {self.proxy_query_method}")
-        logger.info(f"[MOTD] API 失败回退(直连失败时兜底): {'开启' if self.use_api else '关闭'}")
+        # 完整配置摘要由 on_astrbot_loaded 统一输出一行 INFO, 此处仅 DEBUG 留档(避免启动横幅重复刷屏)
+        logger.debug(f"[MOTD] 配置加载: default_server='{self.default_server}', port={self.default_port}, "
+                     f"查询类型={self.query_type}, 代理方式={self.proxy_query_method}, API回退={'开' if self.use_api else '关'}")
     
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         """检查用户是否为管理员"""
@@ -2182,7 +2180,7 @@ class MOTDPlugin(Star):
                 sender_id = event.get_sender_id()
                 return sender_id in admins
         except Exception as e:
-            logger.error(f"[MOTD] 管理员检查失败: {e}")
+            logger.error(f"[MOTD] 管理员检查失败: {e}", exc_info=True)
         return False
     
     def _check_session_allowed(self, event: AstrMessageEvent) -> bool:
@@ -2264,8 +2262,6 @@ class MOTDPlugin(Star):
         raw_name = (version_info.get("name") or "").strip()
         version_name = re.sub(r"\s+", " ", re.sub(r"§.", "", raw_name)).strip()
         name_lower = version_name.lower()
-        logger.info(f"[MOTD] 版本解析输入: name='{version_name}'(协议号已退出解析, 不再读取)")
-
         # ── 1. 代理/多版本检测(启发式, 仅影响"支持"段与标签, 不影响版本名展示) ──
         proxy_name = ""
         is_multi_version = False
@@ -2277,7 +2273,7 @@ class MOTDPlugin(Star):
                 proxy_name = display_name
                 is_multi_version = True
                 detect_reason = f"关键词匹配: '{kw}'"
-                logger.info(f"[MOTD] 代理检测命中: '{kw}' -> {display_name}")
+                logger.debug(f"[MOTD] 代理检测命中: '{kw}' -> {display_name}")
                 break
 
         # 1b. 版本名包含范围格式(如 "1.7.2-1.21.11"、"1.8 - 26.1"、"1.8 / 1.21")
@@ -2286,7 +2282,7 @@ class MOTDPlugin(Star):
             if range_match:
                 is_multi_version = True
                 detect_reason = f"范围格式: '{range_match.group(0)}'"
-                logger.info(f"[MOTD] 多版本检测命中范围格式: '{range_match.group(0)}'")
+                logger.debug(f"[MOTD] 多版本检测命中范围格式: '{range_match.group(0)}'")
 
         # 1c. 版本名列出多个版本(如 "1.7.x, 1.8.x, ..., 1.21.x")
         if not is_multi_version and version_name:
@@ -2294,10 +2290,7 @@ class MOTDPlugin(Star):
             if len(version_matches) >= 4:
                 is_multi_version = True
                 detect_reason = f"多版本列举: {len(version_matches)}个版本"
-                logger.info(f"[MOTD] 多版本检测命中列举: {version_matches}")
-
-        if not is_multi_version:
-            logger.info(f"[MOTD] 未检测到多版本/代理")
+                logger.debug(f"[MOTD] 多版本检测命中列举: {version_matches}")
 
         # ── 2. 解析支持范围(来源一: 版本名; 来源二: ViaVersion supportedVersions 数组) ──
         min_supported_version = ""
@@ -2324,9 +2317,9 @@ class MOTDPlugin(Star):
                     is_multi_version = True
                     detect_reason = f"ViaVersion supportedVersions 数组({len(sv_versions)} 个协议)"
                     sv_hint_used = True
-                    logger.info(f"[MOTD] 多版本检测命中 supportedVersions: {sv_versions}")
+                    logger.debug(f"[MOTD] 多版本检测命中 supportedVersions: {sv_versions}")
             mc_versions.extend(sv_versions)
-            logger.info(f"[MOTD] 版本范围解析: all_versions={all_versions}, sv={sv_versions}, mc_versions={mc_versions}")
+            logger.debug(f"[MOTD] 版本范围解析: all_versions={all_versions}, sv={sv_versions}, mc_versions={mc_versions}")
             if mc_versions:
                 max_supported_version = max(mc_versions, key=_ver_sort_key)
                 min_supported_version = min(mc_versions, key=_ver_sort_key)
@@ -2355,7 +2348,7 @@ class MOTDPlugin(Star):
         else:
             via_hint = ""
 
-        logger.info(f"[MOTD] 版本解析输出: server='{server_version}', client='{client_version}', "
+        logger.debug(f"[MOTD] 版本解析输出: server='{server_version}', client='{client_version}', "
                      f"via_hint='{via_hint}', is_multi_version={is_multi_version}, detect_reason='{detect_reason}'")
 
         return server_version, client_version, via_hint
@@ -2489,7 +2482,7 @@ class MOTDPlugin(Star):
                     event.send(self._plain_chain(event, build_text(context))), timeout=30)
                 return True
             except Exception as e:
-                logger.error(f"[MOTD] 文本发送失败(放弃): {e}")
+                logger.error(f"[MOTD] 文本发送失败(放弃): {e}", exc_info=True)
             return False
         try:
             async with self._send_semaphore:
@@ -2504,19 +2497,19 @@ class MOTDPlugin(Star):
                 await asyncio.wait_for(event.send(event.image_result(url)), timeout=30)
             return True
         except Exception as e:
-            logger.error(f"[MOTD] 图片渲染/发送失败, 回退到文本: {e}")
+            logger.error(f"[MOTD] 图片渲染/发送失败, 回退到文本: {e}", exc_info=True)
         try:
             text = build_text(context)
         except Exception as e:
             # 审计 F054: 回退文本构建失败不应让异常逃出统一发送层
-            logger.error(f"[MOTD] 回退文本构建失败: {e}")
+            logger.error(f"[MOTD] 回退文本构建失败: {e}", exc_info=True)
             text = "查询结果构建失败(详见服务端日志)"
         try:
             await asyncio.wait_for(
                 event.send(self._plain_chain(event, text)), timeout=30)
             return True
         except Exception as e:
-            logger.error(f"[MOTD] 文本回退发送失败(放弃): {e}")
+            logger.error(f"[MOTD] 文本回退发送失败(放弃): {e}", exc_info=True)
         return False
 
     def _resolve_icon(self, result: Dict[str, Any], server_address: str) -> Optional[str]:
@@ -2534,7 +2527,7 @@ class MOTDPlugin(Star):
                 return icon
         cached = get_cached_server_icon(server_address)
         if cached:
-            logger.info(f"[MOTD] 本次查询未返回图标, 使用磁盘缓存图标: {server_address}")
+            logger.debug(f"[MOTD] 本次查询未返回图标, 使用磁盘缓存图标: {server_address}")
         return cached
 
     def _format_response(self, result: Dict[str, Any], server_address: str, is_java: bool = True,
@@ -2545,7 +2538,7 @@ class MOTDPlugin(Star):
                 为空时玩家列表仅携带 UUID, 由渲染端在线拉取(旧行为)
         """
         if "error" in result:
-            logger.info(f"[MOTD] 格式化错误结果: server='{server_address}', error='{result['error']}'")
+            logger.debug(f"[MOTD] 格式化错误结果: server='{server_address}', error='{result['error']}'")
             ctx = self._base_card_context()
             ctx.update({
                 "is_error": True, "is_java": is_java,
@@ -2564,7 +2557,7 @@ class MOTDPlugin(Star):
 
             # 弱机友好: 人数多的服务器样例可能极长, 只记前 8 个, 避免格式化超大字符串白白消耗 CPU/日志体积
             _sample_preview = (players_info.get("sample") or [])[:8]
-            logger.info(f"[MOTD] Java 版原始数据: version={version_info}, "
+            logger.debug(f"[MOTD] Java 版原始数据: version={version_info}, "
                         f"players={players_info.get('online', 0)}/{players_info.get('max', 0)}, 样例(前8)={_sample_preview}")
 
             server_version, client_version, via_hint = self._parse_version(version_info)
@@ -2588,7 +2581,7 @@ class MOTDPlugin(Star):
                 player_list.append(entry)
             extra_count = len(sample) - 8 if len(sample) > 8 else 0
 
-            logger.info(f"[MOTD] 格式化结果: server_version='{server_version}', client_version='{client_version}', "
+            logger.debug(f"[MOTD] 格式化结果: server_version='{server_version}', client_version='{client_version}', "
                         f"players={online}/{max_players}, via_hint='{via_hint}'")
 
             ctx = self._base_card_context()
@@ -2620,8 +2613,8 @@ class MOTDPlugin(Star):
             except (TypeError, ValueError):
                 max_players = 0
 
-            logger.info(f"[MOTD] 基岩版原始数据: {result}")
-            logger.info(f"[MOTD] 基岩版格式化结果: version='{server_version}', players={online}/{max_players}")
+            logger.debug(f"[MOTD] 基岩版原始数据: {result}")
+            logger.debug(f"[MOTD] 基岩版格式化结果: version='{server_version}', players={online}/{max_players}")
 
             ctx = self._base_card_context()
             ctx.update({
@@ -2641,7 +2634,7 @@ class MOTDPlugin(Star):
 
     async def _do_motd_query(self, event: AstrMessageEvent, server: str = "", is_java: bool = True):
         """执行 MOTD 查询的核心逻辑"""
-        logger.info(f"[MOTD] 开始查询: server='{server}', is_java={is_java}")
+        logger.info(f"[MOTD] 开始查询: server='{server}', is_java={is_java}, 超时={self.query_timeout}s, 会话={event.unified_msg_origin}")
 
         # 检查会话权限
         if not self._check_session_allowed(event):
@@ -2665,11 +2658,11 @@ class MOTDPlugin(Star):
                 return
             server = self.default_server
             port = self.default_port
-            logger.info(f"[MOTD] 使用默认服务器: {server}:{port}")
+            logger.debug(f"[MOTD] 使用默认服务器: {server}:{port}")
         else:
             # 用户指定了服务器, 解析地址和端口
             server, port = self._parse_server_address(server.strip(), is_java=is_java)
-            logger.info(f"[MOTD] 使用指定服务器: {server}:{port}")
+            logger.debug(f"[MOTD] 使用指定服务器: {server}:{port}")
 
         server_address = f"{server}:{port}"
 
@@ -2678,10 +2671,8 @@ class MOTDPlugin(Star):
             await event.send(self._plain_chain(event,
                 f"{self._emoji(event, 'searching')} 正在查询..."))
         except Exception as e:
-            logger.warning(f"[MOTD] 查询中提示发送失败(已忽略): {e}")
+            logger.debug(f"[MOTD] 查询中提示发送失败(已忽略): {e}")
 
-        # 执行查询
-        logger.info(f"[MOTD] 开始执行查询, 超时={self.query_timeout}秒")
         try:
             # 统一死线: 不设外层总闸, 各查询函数内部按 query_timeout 自限并返回错误 dict,
             # 具体错误信息(如「连接超时, 请检查地址端口」)得以透出, 也不会误杀临界成功结果
@@ -2703,10 +2694,10 @@ class MOTDPlugin(Star):
                 logger.info(f"[MOTD] 查询完成: source={result.get('source')}, 版本={_ver_name}, "
                             f"玩家={_online}/{_max_p}, 图标={'有' if result.get('icon') else '无'}, 耗时={result.get('latency_ms')}ms")
         except asyncio.TimeoutError:
-            logger.error("[MOTD] 查询超时")
+            logger.error(f"[MOTD] 查询超时(>{self.query_timeout}s): {server_address}")
             result = {"error": "查询超时, 服务器响应时间过长"}
         except Exception as e:
-            logger.error(f"[MOTD] 查询异常: {e}")
+            logger.error(f"[MOTD] 查询异常: {server_address} {e}", exc_info=True)
             result = {"error": f"查询异常: {str(e)}"}
 
         # 预取玩家头像(磁盘缓存命中则零开销), 渲染时内嵌 data URI, 
@@ -2717,7 +2708,7 @@ class MOTDPlugin(Star):
             try:
                 _sample = result.get("players", {}).get("sample", []) or []
                 avatar_map = await get_player_avatars(_sample[:8], self.avatar_cache_ttl, self.avatar_neg_cache_ttl)
-                logger.info(f"[MOTD] 头像预取完成: {len(avatar_map)}/{min(len(_sample), 8)} 个")
+                logger.debug(f"[MOTD] 头像预取完成: {len(avatar_map)}/{min(len(_sample), 8)} 个")
             except Exception as e:
                 logger.warning(f"[MOTD] 玩家头像预取失败(不影响查询结果): {e}")
 
@@ -2744,10 +2735,10 @@ class MOTDPlugin(Star):
             return "\n".join(lines)
 
         await self._send_card_with_fallback(event, MOTD_HTML_TEMPLATE, context, build_text)
-        logger.info("[MOTD] 查询流程完成")
+        logger.debug("[MOTD] 查询流程完成")
     async def _do_proxy_query(self, event: AstrMessageEvent, server: str = ""):
         """执行代理服务器查询"""
-        logger.info(f"[MOTD] 开始代理查询: method={self.proxy_query_method}, server='{server}'")
+        logger.info(f"[MOTD] 开始代理查询: method={self.proxy_query_method}, server='{server}', 超时={self.query_timeout}s")
 
         # 确定代理地址(用于显示)
         if not server or server.strip() == "":
@@ -2770,7 +2761,7 @@ class MOTDPlugin(Star):
             await event.send(self._plain_chain(event,
                 f"{self._emoji(event, 'proxy')} 正在查询..."))
         except Exception as e:
-            logger.warning(f"[MOTD] 查询中提示发送失败(已忽略): {e}")
+            logger.debug(f"[MOTD] 查询中提示发送失败(已忽略): {e}")
 
         # 先查询代理服务器本身
         try:
@@ -2801,13 +2792,18 @@ class MOTDPlugin(Star):
                 sub_servers_data = result["servers"]
                 errors.extend(result["errors"])
 
+        # 子服查询结果汇总: errors 既含子服查询失败, 也含配置缺失提示(velostat 地址/子服列表未配置)
+        logger.info(f"[MOTD] 子服查询汇总: 成功 {len(sub_servers_data)} 个, 失败/异常 {len(errors)} 条")
+        for _err in errors:
+            logger.debug(f"[MOTD] 子服查询失败明细: {_err}")
+
         # 构建模板上下文并通过统一降级发送层发送
         context = self._build_proxy_context(proxy_result, proxy_address, sub_servers_data, errors)
         await self._send_card_with_fallback(
             event, PROXY_HTML_TEMPLATE, context,
             lambda ctx: self._build_proxy_text_response(ctx, proxy_address, event)
         )
-        logger.info("[MOTD] 代理查询流程完成")
+        logger.debug("[MOTD] 代理查询流程完成")
 
     def _build_proxy_context(self, proxy_result: Dict, proxy_address: str,
                              sub_servers: Dict, errors: list) -> Dict[str, Any]:
@@ -2977,7 +2973,7 @@ class MOTDPlugin(Star):
         match = re.match(motd_pattern, message, re.IGNORECASE)
         
         if match:
-            logger.info(f"[MOTD] 匹配到 motd 指令: {message}")
+            logger.debug(f"[MOTD] 匹配到 motd 指令: {message}")
             # 审计 F010: 只看指令 token(motd-bedrock 或其短别名 motdb)是否为基岩,
             # 不再检查整条消息子串, 避免地址里恰好含 '-bedrock' 的 Java 服被误路由到基岩 UDP 查询
             is_bedrock = match.group(1).lower() != 'motd'
@@ -2990,10 +2986,10 @@ class MOTDPlugin(Star):
         """MOTD 查询指令(带斜杠前缀)"""
         # 审计 F011: WakingCheckStage 会剥离唤醒前缀, 斜杠判定须检查消息链首段原始文本
         if not self._is_slash_message(event):
-            logger.info(f"[MOTD] /motd 指令被跳过(消息不以 / 开头)")
+            logger.debug(f"[MOTD] /motd 指令被跳过(消息不以 / 开头)")
             return
         
-        logger.info(f"[MOTD] 收到 /motd 指令: server='{server}'")
+        logger.debug(f"[MOTD] 收到 /motd 指令: server='{server}'")
         await self._do_motd_query(event, server, is_java=True)
 
     @filter.command("motd-bedrock")
@@ -3001,10 +2997,10 @@ class MOTDPlugin(Star):
         """基岩版 MOTD 查询指令(带斜杠前缀)"""
         # 审计 F011: WakingCheckStage 会剥离唤醒前缀, 斜杠判定须检查消息链首段原始文本
         if not self._is_slash_message(event):
-            logger.info(f"[MOTD] /motd-bedrock 指令被跳过(消息不以 / 开头)")
+            logger.debug(f"[MOTD] /motd-bedrock 指令被跳过(消息不以 / 开头)")
             return
         
-        logger.info(f"[MOTD] 收到 /motd-bedrock 指令: server='{server}'")
+        logger.debug(f"[MOTD] 收到 /motd-bedrock 指令: server='{server}'")
         await self._do_motd_query(event, server, is_java=False)
 
     @filter.command("motdb")
@@ -3012,10 +3008,10 @@ class MOTDPlugin(Star):
         """基岩版 MOTD 查询指令 motd-bedrock 的短别名(带斜杠前缀)"""
         # 审计 F011: WakingCheckStage 会剥离唤醒前缀, 斜杠判定须检查消息链首段原始文本
         if not self._is_slash_message(event):
-            logger.info(f"[MOTD] /motdb 指令被跳过(消息不以 / 开头)")
+            logger.debug(f"[MOTD] /motdb 指令被跳过(消息不以 / 开头)")
             return
         
-        logger.info(f"[MOTD] 收到 /motdb 指令: server='{server}'")
+        logger.debug(f"[MOTD] 收到 /motdb 指令: server='{server}'")
         await self._do_motd_query(event, server, is_java=False)
 
     @filter.command("motdr")
@@ -3023,7 +3019,7 @@ class MOTDPlugin(Star):
         """清空头像/图标缓存指令(/motdconfig refresh 的简写)"""
         # 审计 F011: WakingCheckStage 会剥离唤醒前缀, 斜杠判定须检查消息链首段原始文本
         if not self._is_slash_message(event):
-            logger.info(f"[MOTD] /motdr 指令被跳过(消息不以 / 开头)")
+            logger.debug(f"[MOTD] /motdr 指令被跳过(消息不以 / 开头)")
             return
         
         logger.info(f"[MOTD] 收到 /motdr 指令")
@@ -3035,6 +3031,7 @@ class MOTDPlugin(Star):
         
         # 立即刷新: 清空头像/图标磁盘缓存, 下次查询重新下载
         avatar_count, icon_count = clear_disk_cache()
+        logger.info(f"[MOTD] 手动清空缓存(/motdr): 玩家头像 {avatar_count} 个, 服务器图标 {icon_count} 个, 会话={event.unified_msg_origin}")
         yield self._plain_chain(event,
             f"{self._emoji(event, 'success')} 缓存已清空, 下次查询将重新下载\n"
             f"👤 玩家头像: {avatar_count} 个\n"
@@ -3046,7 +3043,7 @@ class MOTDPlugin(Star):
         """MOTD 插件配置指令"""
         # 审计 F011: WakingCheckStage 会剥离唤醒前缀, 斜杠判定须检查消息链首段原始文本
         if not self._is_slash_message(event):
-            logger.info(f"[MOTD] /motdconfig 指令被跳过(消息不以 / 开头)")
+            logger.debug(f"[MOTD] /motdconfig 指令被跳过(消息不以 / 开头)")
             return
         
         logger.info(f"[MOTD] 收到 /motdconfig 指令: action={action}, value={value}")
@@ -3096,7 +3093,7 @@ class MOTDPlugin(Star):
                 self.config.save_config()
                 logger.info(f"[MOTD] 配置已保存: {server}:{port}")
             except Exception as e:
-                logger.error(f"[MOTD] 保存配置失败: {e}")
+                logger.error(f"[MOTD] 保存配置失败: {e}", exc_info=True)
                 yield self._plain_chain(event,
                     f"{self._emoji(event, 'fail')} 服务器可连接, 但配置写入失败, 未生效\n"
                     f"错误: {e}"
@@ -3139,22 +3136,16 @@ class MOTDPlugin(Star):
     @filter.on_astrbot_loaded()
     async def on_astrbot_loaded(self):
         """Bot 初始化完成时"""
-        logger.info("=" * 50)
-        logger.info("[MOTD] 插件已加载 v3.1.0")
-        logger.info("[MOTD] 支持 ViaVersion/Velocity/BungeeCord 多版本兼容")
-        logger.info(f"[MOTD] 默认服务器: {self.default_server}:{self.default_port if self.default_server else '未设置'}")
-        logger.info(f"[MOTD] 查询类型: {self.query_type}")
+        # 启动横幅仅 2 行 INFO(+ 代理模式 1 行): 详细配置在 _load_config 的 DEBUG 留档与 WebUI 配置页
+        _default_disp = f"{self.default_server}:{self.default_port}" if self.default_server else "未设置"
+        logger.info("[MOTD] 插件已加载 v3.2.0(Java/基岩 MOTD 查询, ViaVersion/Velocity/BungeeCord 多版本兼容)")
+        logger.info(f"[MOTD] 配置摘要: 默认服务器={_default_disp}, 查询类型={self.query_type}, 超时={self.query_timeout}s, "
+                    f"输出模式={'图片' if self.output_mode == 'image' else '文本'}, API回退={'开' if self.use_api else '关'}, "
+                    f"头像预取={'开' if self.prefetch_avatars else '关'}, 生效范围={'全部会话' if self.enable_all_sessions else '白名单'}")
         if self.query_type == "proxy":
-            logger.info(f"[MOTD] 代理查询方式: {self.proxy_query_method}")
-            if self.proxy_query_method == "velostat":
-                logger.info(f"[MOTD] velostat API: {self.velostat_api_url or '未配置'}")
-            else:
-                logger.info(f"[MOTD] 子服列表: {self.sub_servers_config or '未配置'}")
-        logger.info(f"[MOTD] 对所有会话生效: {self.enable_all_sessions}")
-        logger.info(f"[MOTD] API 失败回退(直连失败时兜底): {'开启' if self.use_api else '关闭'}")
-        logger.info(f"[MOTD] 头像预取: {'开启' if self.prefetch_avatars else '关闭'}, 头像刷新周期 {self.avatar_cache_ttl} 小时, 下载失败负缓存 {'关闭' if self.avatar_neg_cache_ttl <= 0 else f'{self.avatar_neg_cache_ttl} 分钟'}, 图标缓存保留最后一次成功获取")
-
-        logger.info("=" * 50)
+            _proxy_detail = (self.velostat_api_url or "未配置") if self.proxy_query_method == "velostat" \
+                else f"{len(self.sub_servers_config.split(',')) if self.sub_servers_config else 0} 个子服配置"
+            logger.info(f"[MOTD] 代理模式: 方式={self.proxy_query_method}, 详情={_proxy_detail}")
 
     async def terminate(self):
         """插件被禁用/重载时释放资源: 关闭共享 HTTP 会话"""
