@@ -1596,7 +1596,7 @@ body {
         <span class="badge">{{ badge }}</span>
       </div>
       <div class="meta-row">
-        <span>版本 {{ server_version|e }}</span>
+        <span>{{ server_version|e }}</span>
         {% if client_version and client_version != server_version %}<span>支持 {{ client_version|e }}</span>{% endif %}
         {% if via_hint %}<span class="via-tag">{{ via_hint|e }}</span>{% endif %}
       </div>
@@ -2051,7 +2051,7 @@ body {
         <span class="badge">PROXY</span>
       </div>
       <div class="meta-row">
-        <span>版本 {{ proxy.server_version|e }}</span>
+        <span>{{ proxy.server_version|e }}</span>
         {% if proxy.via_hint %}<span class="via-tag">{{ proxy.via_hint|e }}</span>{% endif %}
       </div>
     </div>
