@@ -88,6 +88,10 @@ PROTOCOL_VERSION_MAP: Dict[int, Tuple[str, str]] = {
     776:  ("26.2", "26.2"),
 }
 
+# 直连握手自报的协议号: 取映射表中最新协议(随版本映射更新自动跟进)
+# 非法协议号可能被部分严格实现直接断连(见 minecraft.wiki Server List Ping 页警告)
+_HANDSHAKE_PROTOCOL = max(PROTOCOL_VERSION_MAP)
+
 # 已知代理/跨版本软件关键词 → 显示名
 _PROXY_KEYWORDS = {
     "velocity": "Velocity",
@@ -262,10 +266,6 @@ def _render_motd_segments(segments: list) -> str:
 _VERSION_TOKEN_SRC = r'\d+\.(?:\d+(?:\.\d+)?|x)'
 _VERSION_RE = re.compile(r'(' + _VERSION_TOKEN_SRC + r')')
 
-# 版本名 → 协议号 反向查找表(从 PROTOCOL_VERSION_MAP 构建)
-_VERSION_TO_PROTOCOL: Dict[str, int] = {}
-
-
 def _norm_ver_token(token: str) -> str:
     """版本 token 规范化: 去掉 '.x' 通配尾段(审计 F003), 如 '1.8.x'->'1.8', '26.x'->'26'"""
     t = (token or "").strip()
@@ -298,75 +298,6 @@ def _is_mc_version_token(token: str) -> bool:
         except ValueError:
             return False
     return major >= 26
-
-
-def _build_version_to_protocol():
-    """从 PROTOCOL_VERSION_MAP 构建版本名到协议号的反向映射"""
-    for proto, (ver_str, _major) in PROTOCOL_VERSION_MAP.items():
-        parts = ver_str.split("-")
-        start = parts[0]
-        end = parts[-1] if len(parts) > 1 else start
-
-        start_m = _VERSION_RE.search(start)
-        end_m = _VERSION_RE.search(end)
-        if not start_m or not end_m:
-            continue
-
-        # 审计 F003: 先剥离 '.x' 通配尾段再转 int(映射表中存在 '26.x' 类显示名)
-        try:
-            start_parts = [int(x) for x in _norm_ver_token(start_m.group(1)).split(".")]
-            end_parts = [int(x) for x in _norm_ver_token(end_m.group(1)).split(".")]
-        except ValueError:
-            continue
-
-        # 补齐到三段
-        while len(start_parts) < 3:
-            start_parts.append(0)
-        while len(end_parts) < 3:
-            end_parts.append(0)
-
-        if start_parts == end_parts:
-            _VERSION_TO_PROTOCOL[".".join(str(x) for x in start_parts)] = proto
-        else:
-            # 范围映射: 首尾版本都指向同一个协议号
-            for ver in [
-                ".".join(str(x) for x in start_parts),
-                ".".join(str(x) for x in end_parts),
-            ]:
-                _VERSION_TO_PROTOCOL[ver] = proto
-
-    # 特殊映射: 范围内未被自动覆盖的中间版本
-    _VERSION_TO_PROTOCOL["26.1.1"] = 775  # 26.1.1 在 26.1.0 和 26.1.2 之间, 共享协议 775
-
-
-_build_version_to_protocol()
-
-
-def _lookup_protocol_from_name(version_name: str) -> Optional[int]:
-    """从版本名中提取最高版本号, 反查协议号. 未找到返回 None. """
-    if not version_name:
-        return None
-    # 审计 F033: 整串精确匹配优先(如 "1.21.4" 直接命中), 避免被截断子串带偏
-    direct = _VERSION_TO_PROTOCOL.get(_norm_ver_token(version_name.strip()))
-    if direct is not None:
-        return direct
-    matches = [_norm_ver_token(v) for v in _VERSION_RE.findall(version_name)]
-    # 审计 F033: 只保留像 MC 版本号的 token(排除代理软件自身版本号如 Velocity 3.4.0)
-    matches = [v for v in matches if _is_mc_version_token(v)]
-    if not matches:
-        return None
-    # 取最高版本号
-    best = max(matches, key=_ver_sort_key)
-    # 先精确查找, 再尝试补齐到三段查找(如 1.8 → 1.8.0)
-    result = _VERSION_TO_PROTOCOL.get(best)
-    if result is not None:
-        return result
-    parts = best.split(".")
-    if len(parts) == 2:
-        result = _VERSION_TO_PROTOCOL.get(f"{best}.0")
-        if result is not None:
-            return result
-    return None
 
 
 def _html_escape(text: str) -> str:
@@ -720,10 +651,9 @@ def get_cached_server_icon(server_address: str) -> Optional[str]:
 async def query_java_server_api(host: str, port: int = JAVA_DEFAULT_PORT, *, timeout: float) -> Dict[str, Any]:
     """使用第三方 API 查询 Java 版服务器状态
 
-    timeout 必传(统一死线语义): 与直连支共享同一 query_timeout, 函数内部不再有任何固定超时值. 
+    timeout 必传(统一死线语义): 回退场景下由调用方传入**死线剩余部分**(query_timeout − 直连已耗时), 函数内部无任何固定超时值. 
+    返回的 version.protocol 原样透传(显示层已不使用协议号, 版本名原样展示). 
     """
-    _loop = asyncio.get_running_loop()
-    _deadline = _loop.time() + timeout
     _t0 = time.perf_counter()
     try:
         # 复用全局共享 HTTP 会话: 会话由 terminate() 统一释放
@@ -744,29 +674,6 @@ async def query_java_server_api(host: str, port: int = JAVA_DEFAULT_PORT, *, tim
                                 f"version.name_clean='{version_data.get('name_clean')}', "
                                 f"version.name='{version_data.get('name')}', "
                                 f"version.protocol={protocol_raw}")
-
-                    # API 返回 protocol: null 时, 尝试从版本名反查协议号
-                    if protocol_raw is None:
-                        logger.info(f"[MOTD] API 返回 protocol=null, 尝试从版本名反查")
-                        protocol_raw = _lookup_protocol_from_name(version_name_raw)
-                        if protocol_raw is not None:
-                            logger.info(f"[MOTD] 从版本名 '{version_name_raw}' 反查到协议 {protocol_raw}")
-                        else:
-                            # 反查失败, 尝试直连查询补全协议号(受本支剩余死线约束, 不额外扩时; 
-                            #   剩余时间不足则跳过, 协议号保持 0, 由 _parse_version 从版本名兜底)
-                            logger.info(f"[MOTD] 版本名反查失败, 尝试直连查询补全")
-                            _remaining = _deadline - _loop.time()
-                            direct = (
-                                await query_java_server_direct(host, port, timeout=_remaining)
-                                if _remaining > 0
-                                else {"error": "统一死线剩余时间不足, 跳过直连补全"}
-                            )
-                            if "error" not in direct and "version" in direct:
-                                protocol_raw = direct["version"].get("protocol")
-                                if protocol_raw is not None:
-                                    logger.info(f"[MOTD] 直连查询补全协议号: {protocol_raw}")
-                                else:
-                                    logger.info(f"[MOTD] 直连查询也未返回协议号")
 
                     players_data = data.get("players", {})
                     # 玩家样例列表(mcstatus.io v2 字段为 list, 直连为 sample, 统一映射为 sample)
@@ -791,7 +698,7 @@ async def query_java_server_api(host: str, port: int = JAVA_DEFAULT_PORT, *, tim
                     }
                 else:
                     # 措辞注意: 这是 mcstatus.io 探测节点的视角——目标服务器可能其实在线(例如探测节点被
-                    # Hypixel 这类带防护的大型服务器屏蔽, 或 API 自身故障), 竞速中由直连分支给出真实结果
+                    # Hypixel 这类带防护的大型服务器屏蔽, 或 API 自身故障), 回退场景下此错误仅入日志, 最终仍返回直连错误
                     return {"error": "API 探测报告服务器离线"}
             else:
                 return {"error": f"API 请求失败: {resp.status}"}
@@ -932,7 +839,7 @@ def _srv_query_sync(host: str, resolver: str, timeout: float) -> Tuple[int, List
 async def _resolve_minecraft_srv(host: str) -> Optional[Tuple[str, int]]:
     """查询 _minecraft._tcp.<host> SRV 记录, 返回 (target, port); 无记录或失败返回 None(调用方回退直连 A 记录)
 
-    多解析器并发竞速, 谁先给出明确答案(NXDOMAIN/NOERROR)用谁——与 Java 查询的 API/直连竞速同款模式; 
+    多解析器并发竞速, 谁先给出明确答案(NXDOMAIN/NOERROR)用谁; 
     不做任何缓存: 每次调用都实时发起 DNS 解析, 保证 SRV 记录变更即时生效. 
     """
     # 审计 F042: 多解析器并发经默认线程池执行, 峰值占用 5 线程 × 至多 1.5s;
@@ -1016,7 +923,7 @@ async def query_java_server_direct(host: str, port: int = JAVA_DEFAULT_PORT, tim
         try:
             # 发送握手包
             handshake_data = (
-                _pack_varint(-1 & 0xFFFFFFFF) +  # 协议版本 -1(按无符号 32 位编码, 原版客户端线格式; 直接传 -1 会因 Python 负数右移恒为负而死循环)
+                _pack_varint(_HANDSHAKE_PROTOCOL) +  # 协议版本: 映射表最新真实协议号(真实客户端发自身真实协议; -1 是探测惯例值, 会被 Via 屏蔽下界标记且可能被部分严格实现断连)
                 _pack_data(host.encode('utf-8')) +
                 struct.pack('>H', port) +
                 _pack_varint(1)  # 状态请求
@@ -1079,85 +986,54 @@ async def query_java_server_direct(host: str, port: int = JAVA_DEFAULT_PORT, tim
 
 
 async def query_java_server(host: str, port: int = JAVA_DEFAULT_PORT, timeout: int = 5, use_api: bool = True) -> Dict[str, Any]:
-    """查询 Java 版服务器状态: API 与 TCP 直连并发竞速, 谁先成功用谁(统一死线语义)
+    """查询 Java 版服务器状态: TCP 直连优先, 失败后用剩余死线回退 API(统一死线语义)
 
-    - timeout 即本函数的总耗时上限: 两支共享同一死线, 各支内部自限
-      (API 为 HTTP total=timeout, 直连为内部 wait_for(timeout)), 无外层总闸、无 ±N 加减; 
-    - use_api=False 时仅直连查询; 
-    - 直连先成功且协议号 ≤ 0(代理服务器)时, 复用竞速中的 API 任务补全带范围的版本名, 
-      等待至多到统一死线为止, 到点未完成则放弃补全、保留直连结果(不让成功结果被死线吃掉); 
-    - 两支都失败时优先返回直连的错误信息(对用户更有指向性). 
-    - 返回结果的 latency_ms 统一修正为**端到端总耗时**(竞速等待与补全版本名等待都计入), 
-      而非获胜支自身耗时, 与用户实际等待时长一致. 
+    - timeout 即本函数的总耗时上限: 直连内部自限 timeout; 直连失败后 API 仅获得
+      死线剩余部分(timeout - 已耗时), 全程无外层总闸、无固定超时值、无 ±N 加减; 
+    - use_api=False 时仅直连查询, 不触发 API 回退; 
+    - API 仅作为直连失败后的兜底保险: 直连可达时(绝大多数场景)零 API 请求, 
+      不浪费 mcstatus.io 配额(其限流为每 IP 5 请求/秒); 
+    - 版本名原样展示, 协议号不参与任何判断(显示层只消费 version.name 与 supportedVersions); 
+    - 直连失败且 API 也失败(或死线耗尽无回退窗口)时, 返回直连的错误信息(对用户更有指向性); 
+    - 返回结果的 latency_ms 统一修正为**端到端总耗时**(含直连尝试与 API 回退等待), 
+      与用户实际等待时长一致. 
     """
     _t0 = time.perf_counter()
 
     def _stamp(result: Dict[str, Any]) -> Dict[str, Any]:
-        # 端到端耗时修正: 覆盖获胜支自带的 latency_ms(直连=其 RTT 段耗时, API=其 HTTP 耗时),
-        # 使显示值包含竞速等待与"直连获胜后等 API 补版本名"的等待, 更符合实际等待时长
+        # 端到端耗时修正: 覆盖采用支自带的 latency_ms(直连=其 RTT 段耗时, API=其 HTTP 耗时),
+        # 使显示值包含失败回退的等待, 更符合实际等待时长
         if isinstance(result, dict) and "error" not in result:
             result["latency_ms"] = round((time.perf_counter() - _t0) * 1000)
         return result
 
+    # 第一优先: 直连查询(内部自限 timeout, 网络层异常均归一为 {"error": ...})
+    direct_result = await query_java_server_direct(host, port, timeout)
+    if "error" not in direct_result:
+        # 直连成功: 立即返回, 不发起任何 API 请求
+        logger.info(f"[MOTD] 直连查询成功: name='{direct_result.get('version', {}).get('name', '')}'")
+        return _stamp(direct_result)
+
     if not use_api:
-        return _stamp(await query_java_server_direct(host, port, timeout))
+        return direct_result
 
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    api_task = asyncio.create_task(query_java_server_api(host, port, timeout=timeout))
-    direct_task = asyncio.create_task(query_java_server_direct(host, port, timeout))
-    pending = {api_task, direct_task}
+    # 直连失败: 用死线剩余部分回退 API(总死线仍为 timeout, 无固定值)
+    # 顺序 await 而非 create_task: 外层取消自然传播进当前协程, 无需手动回收子任务(替代旧竞速版的 F017 手动回收)
+    remaining = timeout - (time.perf_counter() - _t0)
+    if remaining <= 0:
+        # 直连耗满整个死线(典型为被墙/防火墙静默丢包导致的挂起), API 无时间窗, 直接返回直连错误
+        logger.info(f"[MOTD] 直连失败({direct_result.get('error')})且死线已耗尽, 无 API 回退窗口")
+        return direct_result
 
-    # 审计 F017: 外层协程被取消(如插件 terminate/会话中止)时, 两支子任务必须回收
-    try:
-        while pending:
-            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                # 两个查询函数内部均捕获异常并返回 {"error": ...}, task.result() 不会抛出
-                result = task.result()
-                if "error" in result:
-                    logger.info(f"[MOTD] 竞速查询一支失败({result.get('error')}), 等待另一支")
-                    continue
-                if task is direct_task:
-                    # 直连成功
-                    proto = result.get("version", {}).get("protocol", 0)
-                    version_name = result.get("version", {}).get("name", "")
-                    logger.info(f"[MOTD] 直连查询获胜: protocol={proto}, name='{version_name}'")
-                    if proto is not None and proto <= 0:
-                        # 代理服务器: 等待竞速中的 API 任务补全版本范围(至多到统一死线, 到点放弃补全)
-                    # 审计 F044: 现代 Velocity/BungeeCord 对未知协议返回最新协议号(>0),
-                    # 本分支仅服务 ViaVersion 屏蔽标记 -1 等极端场景, 保留兜底
-                        logger.info(f"[MOTD] 直连协议号 {proto} ≤ 0, 等待 API 任务补全版本范围(至多到统一死线)")
-                        remaining = deadline - loop.time()
-                        api_done, _api_pending = set(), {api_task}
-                        if remaining > 0:
-                            api_done, _api_pending = await asyncio.wait({api_task}, timeout=remaining)
-                        if api_task in api_done:
-                            api_result = api_task.result()
-                            if "error" not in api_result:
-                                api_name = api_result.get("version", {}).get("name", "")
-                                if api_name and api_name != version_name:
-                                    result["version"]["name"] = api_name
-                                    logger.info(f"[MOTD] API 补全版本名: '{version_name}' -> '{api_name}'")
-                                else:
-                                    logger.info(f"[MOTD] API 版本名相同或为空, 无需补全")
-                            else:
-                                logger.info(f"[MOTD] API 支未能提供版本名({api_result.get('error')}), 保留直连结果")
-                        else:
-                            logger.info(f"[MOTD] 统一死线已到, 放弃等待 API 补全版本名, 保留直连结果")
-                    api_task.cancel()  # 补全等待已结束: 已完成时为 no-op, 仍在飞则中止
-                    return _stamp(result)
-                # API 先成功: 取消直连任务, 直接采用(直连通常更快, 能被 API 抢先说明直连不可达)
-                direct_task.cancel()
-                logger.info(f"[MOTD] API 查询获胜({result.get('latency_ms')}ms)")
-                return _stamp(result)
-    except asyncio.CancelledError:
-        api_task.cancel()
-        direct_task.cancel()
-        raise
+    logger.info(f"[MOTD] 直连失败({direct_result.get('error')}), 回退 API 查询(剩余死线 {remaining:.1f}s)")
+    api_result = await query_java_server_api(host, port, timeout=remaining)
+    if "error" not in api_result:
+        logger.info(f"[MOTD] API 回退成功({api_result.get('latency_ms')}ms)")
+        return _stamp(api_result)
+    logger.info(f"[MOTD] API 回退也失败({api_result.get('error')}), 采用直连错误")
 
-    # 两支都失败: 返回直连的错误信息
-    return direct_task.result()
+    # 两支都失败: 返回直连的错误信息(对用户更有指向性)
+    return direct_result
 
 
 def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, timeout: int = 5) -> Dict[str, Any]:
@@ -1502,8 +1378,7 @@ body {
     align-items: center;
     gap: 14px;
     min-width: 0;
-    overflow: hidden;
-    white-space: nowrap;
+    flex-wrap: wrap;
 }
 .via-tag {
     font-size: 26px;
@@ -1900,8 +1775,7 @@ body {
     align-items: center;
     gap: 14px;
     min-width: 0;
-    overflow: hidden;
-    white-space: nowrap;
+    flex-wrap: wrap;
 }
 .via-tag {
     font-size: 24px;
@@ -2239,7 +2113,7 @@ body {
 PROXY_HTML_TEMPLATE = _PROXY_TEMPLATE_SRC.replace("__DIRT_TILE__", _DIRT_TILE)
 
 
-@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件, 支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "3.0.0")
+@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件, 支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "3.1.0")
 class MOTDPlugin(Star):
     """MOTD 查询插件主类"""
 
@@ -2253,7 +2127,7 @@ class MOTDPlugin(Star):
         # 发送闸门: 串行化「渲染+发送」段, 群聊多人同时查询时不再叠加渲染/上传开销(渲染失败有文本回退, 不会永久占用)
         self._send_semaphore = asyncio.Semaphore(1)
         self._load_config()
-        logger.info(f"[MOTD] 插件初始化完成, 版本 3.0.0")
+        logger.info(f"[MOTD] 插件初始化完成, 版本 3.1.0")
     
     def _load_config(self):
         """加载插件配置"""
@@ -2297,7 +2171,7 @@ class MOTDPlugin(Star):
 
         logger.info(f"[MOTD] 配置加载: default_server='{self.default_server}', port={self.default_port}")
         logger.info(f"[MOTD] 查询类型: {self.query_type}, 代理查询方式: {self.proxy_query_method}")
-        logger.info(f"[MOTD] 使用 API 查询: {self.use_api}")
+        logger.info(f"[MOTD] API 失败回退(直连失败时兜底): {'开启' if self.use_api else '关闭'}")
     
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         """检查用户是否为管理员"""
@@ -2379,53 +2253,25 @@ class MOTDPlugin(Star):
     
     def _parse_version(self, version_info: Dict[str, Any]) -> Tuple[str, str, str]:
         """
-        解析版本信息, 支持 ViaVersion/Velocity/BungeeCord 等多版本兼容模式
+        解析版本信息: 版本名原样展示(服务端发来啥用啥), 不使用协议号
         返回: (服务器版本, 支持的客户端版本, 代理/多版本提示)
+        支持范围来源: 版本名中的版本 token / supportedVersions 数组(经映射表翻译)
+        版本名仅剥离 § 格式码与多余空白(格式码是控制字符非内容, 版本行不渲染颜色), 其余一字不改
         """
         # 审计 F022: mcstatus.io 可能返回 version=null, 防御非 dict 输入
         if not isinstance(version_info, dict):
             version_info = {}
-        version_name = (version_info.get("name") or "").strip()
+        raw_name = (version_info.get("name") or "").strip()
+        version_name = re.sub(r"\s+", " ", re.sub(r"§.", "", raw_name)).strip()
+        name_lower = version_name.lower()
+        logger.info(f"[MOTD] 版本解析输入: name='{version_name}'(协议号已退出解析, 不再读取)")
 
-        # 确保 protocol 是整数
-        protocol_raw = version_info.get("protocol", 0)
-        try:
-            protocol = int(protocol_raw) if protocol_raw is not None else 0
-        except (ValueError, TypeError):
-            protocol = 0
-
-        logger.info(f"[MOTD] 版本解析输入: name='{version_name}', protocol_raw={protocol_raw}, protocol={protocol}")
-
-        # ── 1. 从版本名提取版本号 ──
-        version_in_name = None
-        if version_name:
-            m = _VERSION_RE.search(version_name)
-            if m:
-                version_in_name = m.group(1)
-                logger.info(f"[MOTD] 从版本名提取版本号: '{version_in_name}'")
-
-        # ── 1.5 协议号无效时, 从版本名反查 ──
-        if protocol <= 0 and version_name:
-            looked_up = _lookup_protocol_from_name(version_name)
-            if looked_up is not None:
-                logger.info(f"[MOTD] 协议号无效({protocol}), 从版本名 '{version_name}' 反查到协议 {looked_up}")
-                protocol = looked_up
-            else:
-                logger.info(f"[MOTD] 协议号无效({protocol}), 从版本名 '{version_name}' 反查失败")
-
-        # ── 2. 用协议号查服务器实际版本 ──
-        proto_ver_display, proto_major = PROTOCOL_VERSION_MAP.get(protocol, ("", ""))
-        if protocol > 0:
-            logger.info(f"[MOTD] 协议号映射: {protocol} -> display='{proto_ver_display}', major='{proto_major}'")
-
-        # ── 3. 代理/多版本检测 ──
+        # ── 1. 代理/多版本检测(启发式, 仅影响"支持"段与标签, 不影响版本名展示) ──
         proxy_name = ""
         is_multi_version = False
         detect_reason = ""
 
-        name_lower = version_name.lower()
-
-        # 3a. 版本名包含已知代理软件名
+        # 1a. 版本名包含已知代理软件名
         for kw, display_name in _PROXY_KEYWORDS.items():
             if kw in name_lower:
                 proxy_name = display_name
@@ -2434,7 +2280,7 @@ class MOTDPlugin(Star):
                 logger.info(f"[MOTD] 代理检测命中: '{kw}' -> {display_name}")
                 break
 
-        # 3b. 版本名包含范围格式(如 "1.7.2-1.21.11"、"1.8 - 26.1"、"1.8 / 1.21")
+        # 1b. 版本名包含范围格式(如 "1.7.2-1.21.11"、"1.8 - 26.1"、"1.8 / 1.21")
         if not is_multi_version and version_name:
             range_match = re.search(r'(' + _VERSION_TOKEN_SRC + r')[\w.]*\s*[-~–/]\s*(' + _VERSION_TOKEN_SRC + r')', version_name)
             if range_match:
@@ -2442,7 +2288,7 @@ class MOTDPlugin(Star):
                 detect_reason = f"范围格式: '{range_match.group(0)}'"
                 logger.info(f"[MOTD] 多版本检测命中范围格式: '{range_match.group(0)}'")
 
-        # 3c. 版本名列出多个版本(如 "1.7.x, 1.8.x, ..., 1.21.x")
+        # 1c. 版本名列出多个版本(如 "1.7.x, 1.8.x, ..., 1.21.x")
         if not is_multi_version and version_name:
             version_matches = _VERSION_RE.findall(version_name)
             if len(version_matches) >= 4:
@@ -2450,32 +2296,21 @@ class MOTDPlugin(Star):
                 detect_reason = f"多版本列举: {len(version_matches)}个版本"
                 logger.info(f"[MOTD] 多版本检测命中列举: {version_matches}")
 
-        # 3d. 协议号 47 + 版本名提及高版本 → BungeeCord/Velocity
-        if not is_multi_version and protocol == 47 and version_in_name:
-            try:
-                ver_parts = [int(x) for x in version_in_name.split('.')]
-                if len(ver_parts) >= 2 and (ver_parts[0] > 1 or (ver_parts[0] == 1 and ver_parts[1] > 8)):
-                    is_multi_version = True
-                    detect_reason = f"协议47+高版本名: '{version_in_name}'"
-                    logger.info(f"[MOTD] 多版本检测命中协议47+高版本: proto=47, version='{version_in_name}'")
-            except (ValueError, IndexError):
-                pass
-
         if not is_multi_version:
             logger.info(f"[MOTD] 未检测到多版本/代理")
 
-        # ── 4. 解析支持范围(来源一: 版本名; 来源二: ViaVersion supportedVersions 数组) ──
+        # ── 2. 解析支持范围(来源一: 版本名; 来源二: ViaVersion supportedVersions 数组) ──
         min_supported_version = ""
         max_supported_version = ""
         sv_hint_used = False
         supported_raw = version_info.get("supportedVersions") if isinstance(version_info, dict) else None
         has_supported = isinstance(supported_raw, list) and len(supported_raw) > 0
-        if is_multi_version or has_supported or version_name:
+        if is_multi_version or has_supported:
             # 来源一: 版本名中的版本 token(审计 F003: '.x' 尾段规范化, '26' 单段大版本接受)
             all_versions = [_norm_ver_token(v) for v in _VERSION_RE.findall(version_name)]
             mc_versions = [v for v in all_versions if _is_mc_version_token(v)]
             # 来源二: ViaVersion send-supported-versions=true 时上报的协议号数组
-            # (审计 F051: 之前 0 处消费; 官方字段, 值为协议号 int 列表)
+            # (审计 F051: 官方字段, 值为协议号 int 列表, 经映射表翻译为可读版本)
             sv_versions = []
             if has_supported:
                 for proto_id in supported_raw:
@@ -2495,34 +2330,21 @@ class MOTDPlugin(Star):
             if mc_versions:
                 max_supported_version = max(mc_versions, key=_ver_sort_key)
                 min_supported_version = min(mc_versions, key=_ver_sort_key)
-                # 审计 F003: 协议号映射版本若比名称解析上界更新, 用映射值补全
-                # (BungeeCord '-1' 握手下 protocol=最新支持协议, 如 776 -> '26.2')
-                if proto_ver_display and _ver_sort_key(proto_ver_display) > _ver_sort_key(max_supported_version):
-                    max_supported_version = proto_ver_display
 
-        # ── 5. 构建显示结果 ──
+        # ── 3. 构建显示结果: 版本名原样, 协议号不参与 ──
+        server_version = version_name if version_name else "未知"
         if is_multi_version:
-            # 多版本兼容服务器: 服务器版本用协议号映射, 客户端版本显示支持范围
-            server_version = proto_ver_display or version_in_name or "未知"
             if min_supported_version and max_supported_version and min_supported_version != max_supported_version:
                 client_version = f"{min_supported_version} ~ {max_supported_version}"
             elif max_supported_version:
                 client_version = f"≤ {max_supported_version}"
             else:
-                client_version = version_name if version_name else "未知"
-        elif version_name and version_name not in ("", "未知", "Unknown"):
-            # 普通服务器, 有版本名
-            server_version = version_name
-            client_version = version_name
-        elif protocol > 0:
-            # 用协议号推断
-            server_version = proto_ver_display or "未知"
-            client_version = server_version
+                client_version = server_version
         else:
-            server_version = "未知"
-            client_version = "未知"
+            # 普通服务器: 与 server_version 相同, 模板据此隐藏"支持"段
+            client_version = server_version
 
-        # ── 6. 代理/多版本提示 ──
+        # ── 4. 代理/多版本提示 ──
         if is_multi_version:
             if sv_hint_used:
                 via_hint = "ViaVersion"
@@ -3150,25 +2972,24 @@ class MOTDPlugin(Star):
         if not re.match(r'^motd', message, re.IGNORECASE):
             return
         
-        # 匹配 motd 指令模式
-        motd_pattern = r'^(motd)(-bedrock)?(?:\s+(.+))?$'
+        # 匹配 motd 指令模式(motdb 为 motd-bedrock 的短别名)
+        motd_pattern = r'^(motdb|motd-bedrock|motd)(?:\s+(.+))?$'
         match = re.match(motd_pattern, message, re.IGNORECASE)
         
         if match:
             logger.info(f"[MOTD] 匹配到 motd 指令: {message}")
-            # 审计 F010: 只看指令 token 是否带 -bedrock, 不再检查整条消息子串,
-            # 避免地址里恰好含 '-bedrock' 的 Java 服被误路由到基岩 UDP 查询
-            is_bedrock = match.group(2) is not None
-            server = match.group(3).strip() if match.group(3) else ""
+            # 审计 F010: 只看指令 token(motd-bedrock 或其短别名 motdb)是否为基岩,
+            # 不再检查整条消息子串, 避免地址里恰好含 '-bedrock' 的 Java 服被误路由到基岩 UDP 查询
+            is_bedrock = match.group(1).lower() != 'motd'
+            server = match.group(2).strip() if match.group(2) else ""
             
             await self._do_motd_query(event, server, is_java=not is_bedrock)
 
     @filter.command("motd")
     async def motd_query_cmd(self, event: AstrMessageEvent, server: str = ""):
         """MOTD 查询指令(带斜杠前缀)"""
-        # 获取原始消息, 检查是否以 / 开头
-        message_str = event.message_str.strip()
-        if not message_str.startswith('/'):
+        # 审计 F011: WakingCheckStage 会剥离唤醒前缀, 斜杠判定须检查消息链首段原始文本
+        if not self._is_slash_message(event):
             logger.info(f"[MOTD] /motd 指令被跳过(消息不以 / 开头)")
             return
         
@@ -3178,21 +2999,30 @@ class MOTDPlugin(Star):
     @filter.command("motd-bedrock")
     async def motd_bedrock_query_cmd(self, event: AstrMessageEvent, server: str = ""):
         """基岩版 MOTD 查询指令(带斜杠前缀)"""
-        # 获取原始消息, 检查是否以 / 开头
-        message_str = event.message_str.strip()
-        if not message_str.startswith('/'):
+        # 审计 F011: WakingCheckStage 会剥离唤醒前缀, 斜杠判定须检查消息链首段原始文本
+        if not self._is_slash_message(event):
             logger.info(f"[MOTD] /motd-bedrock 指令被跳过(消息不以 / 开头)")
             return
         
         logger.info(f"[MOTD] 收到 /motd-bedrock 指令: server='{server}'")
         await self._do_motd_query(event, server, is_java=False)
 
+    @filter.command("motdb")
+    async def motdb_query_cmd(self, event: AstrMessageEvent, server: str = ""):
+        """基岩版 MOTD 查询指令 motd-bedrock 的短别名(带斜杠前缀)"""
+        # 审计 F011: WakingCheckStage 会剥离唤醒前缀, 斜杠判定须检查消息链首段原始文本
+        if not self._is_slash_message(event):
+            logger.info(f"[MOTD] /motdb 指令被跳过(消息不以 / 开头)")
+            return
+        
+        logger.info(f"[MOTD] 收到 /motdb 指令: server='{server}'")
+        await self._do_motd_query(event, server, is_java=False)
+
     @filter.command("motdr")
     async def motd_refresh_cmd(self, event: AstrMessageEvent):
         """清空头像/图标缓存指令(/motdconfig refresh 的简写)"""
-        # 获取原始消息, 检查是否以 / 开头
-        message_str = event.message_str.strip()
-        if not message_str.startswith('/'):
+        # 审计 F011: WakingCheckStage 会剥离唤醒前缀, 斜杠判定须检查消息链首段原始文本
+        if not self._is_slash_message(event):
             logger.info(f"[MOTD] /motdr 指令被跳过(消息不以 / 开头)")
             return
         
@@ -3214,9 +3044,8 @@ class MOTDPlugin(Star):
     @filter.command("motdconfig")
     async def motd_config_cmd(self, event: AstrMessageEvent, action: str = "", value: str = ""):
         """MOTD 插件配置指令"""
-        # 获取原始消息, 检查是否以 / 开头
-        message_str = event.message_str.strip()
-        if not message_str.startswith('/'):
+        # 审计 F011: WakingCheckStage 会剥离唤醒前缀, 斜杠判定须检查消息链首段原始文本
+        if not self._is_slash_message(event):
             logger.info(f"[MOTD] /motdconfig 指令被跳过(消息不以 / 开头)")
             return
         
@@ -3293,7 +3122,7 @@ class MOTDPlugin(Star):
                 f"⏱️ 查询超时: {self.query_timeout}秒\n"
                 f"📤 输出模式: {'图片卡片' if self.output_mode == 'image' else '纯文本(低配设备)'}\n"
                 f"📐 卡片高度: {'随内容自适应' if self.card_height_mode == 'auto' else '固定(720px)'}\n"
-                f"🌐 使用 API 竞速查询: {'是' if self.use_api else '否'}\n"
+                f"🌐 API 失败回退: {'是' if self.use_api else '否'}(直连失败时兜底)\n"
                 f"👤 头像预取: {'开启' if self.prefetch_avatars else '关闭'}(刷新周期 {self.avatar_cache_ttl} 小时, 失败负缓存 {'关闭' if self.avatar_neg_cache_ttl <= 0 else f'{self.avatar_neg_cache_ttl} 分钟'})\n"
                 f"🖼️ 图标缓存: 保留最后一次成功获取(/motdr 清空)"
             )
@@ -3311,7 +3140,7 @@ class MOTDPlugin(Star):
     async def on_astrbot_loaded(self):
         """Bot 初始化完成时"""
         logger.info("=" * 50)
-        logger.info("[MOTD] 插件已加载 v3.0.0")
+        logger.info("[MOTD] 插件已加载 v3.1.0")
         logger.info("[MOTD] 支持 ViaVersion/Velocity/BungeeCord 多版本兼容")
         logger.info(f"[MOTD] 默认服务器: {self.default_server}:{self.default_port if self.default_server else '未设置'}")
         logger.info(f"[MOTD] 查询类型: {self.query_type}")
@@ -3322,7 +3151,7 @@ class MOTDPlugin(Star):
             else:
                 logger.info(f"[MOTD] 子服列表: {self.sub_servers_config or '未配置'}")
         logger.info(f"[MOTD] 对所有会话生效: {self.enable_all_sessions}")
-        logger.info(f"[MOTD] 使用 API 查询: {self.use_api}")
+        logger.info(f"[MOTD] API 失败回退(直连失败时兜底): {'开启' if self.use_api else '关闭'}")
         logger.info(f"[MOTD] 头像预取: {'开启' if self.prefetch_avatars else '关闭'}, 头像刷新周期 {self.avatar_cache_ttl} 小时, 下载失败负缓存 {'关闭' if self.avatar_neg_cache_ttl <= 0 else f'{self.avatar_neg_cache_ttl} 分钟'}, 图标缓存保留最后一次成功获取")
 
         logger.info("=" * 50)

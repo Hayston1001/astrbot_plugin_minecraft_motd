@@ -62,13 +62,13 @@
     "query_timeout": {
         "description": "查询总超时时间(秒)",
         "type": "int",
-        "hint": "建议 5~10",
+        "hint": "单次查询的总死线: 直连自限此时长; 开启 API 回退时, API 仅使用直连失败后的剩余时间",
         "default": 5
     },
     "use_api": {
-        "description": "调用 API",
+        "description": "API 失败回退",
         "type": "bool",
-        "hint": "调用 mcstatus.io API 与 TCP 直连并发查询(推荐)",
+        "hint": "直连失败后兜底: 回退调用 mcstatus.io API",
         "default": true
     },
     "output_mode": {
