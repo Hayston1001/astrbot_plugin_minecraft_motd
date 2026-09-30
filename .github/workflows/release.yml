@@ -21,7 +21,7 @@ jobs:
 
       - name: Verify tag matches metadata version
         run: |
-          # 审计 F030: 防止误贴 tag 发布错版本
+          # 防止误贴 tag 发布错版本
           META_VERSION="$(grep '^version:' metadata.yaml | sed 's/version:[[:space:]]*//' | tr -d '[:space:]')"
           TAG_VERSION="${GITHUB_REF#refs/tags/v}"
           if [ "v${META_VERSION}" != "v${TAG_VERSION}" ]; then
@@ -35,11 +35,12 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
           # 提取当前版本的changelog内容（从 ## vX.Y.Z 到下一个 ## 或文件结尾）
-          # 审计 F028: 改用 awk 整行精确匹配(原 sed 的正则点号未转义且未锚定行,
+          # 改用 awk 整行精确匹配(原 sed 的正则点号未转义且未锚定行,
           # 短前缀 tag 如 v3.0 会误匹配 v3.0.0 的小节)
           NOTES=$(awk -v header="## v${VERSION}" '$0 == header {p=1; next} /^## v/ && p {exit} p' CHANGELOG.md)
           if [ -z "$NOTES" ]; then
-            NOTES="No release notes found in CHANGELOG.md"
+            echo "::error::CHANGELOG.md 中未找到版本 v${VERSION} 对应的小节, 终止发布"
+            exit 1
           fi
           # 写入多行输出
           echo "NOTES<<EOF" >> $GITHUB_OUTPUT
