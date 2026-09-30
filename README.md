@@ -1,4 +1,4 @@
-<p align="center"><img src="https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/logo.png?v=1" width="96" alt="logo"></p>
+<p align="center"><img src="https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/logo.png?v=2" width="96" alt="logo"></p>
 
 # MC 服务器状态查询(AstrBot MOTD 查询插件)
 
