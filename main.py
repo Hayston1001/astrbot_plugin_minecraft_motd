@@ -1298,6 +1298,9 @@ body {
     padding: 30px 34px 34px;
     box-sizing: border-box;
     flex: 1 0 auto;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
 }
 /* ── 物品栏格子槽: 凹陷浮雕(与面板反向) ── */
 .slot {
@@ -1345,7 +1348,8 @@ body {
     min-width: 0;
 }
 .addr {
-    font-size: 60px;
+    font-size: 44px;
+    line-height: 1.25;
     font-weight: 700;
     color: #fff;
     text-shadow: 3px 3px 0 #000;
@@ -1357,8 +1361,8 @@ body {
 .badge {
     font-family: var(--pixel);
     font-size: 17px;
-    line-height: 1;
-    padding: 6px 12px 5px;
+    line-height: 1.4;
+    padding: 7px 12px;
     background: #191919;
     border: 2px solid var(--accent, var(--muted));
     color: var(--accent, var(--muted));
@@ -1370,7 +1374,8 @@ body {
 .accent-proxy { --accent: var(--aqua); }
 .meta-row {
     margin-top: 10px;
-    font-size: 30px;
+    font-size: 25px;
+    line-height: 1.5;
     color: var(--muted);
     display: flex;
     align-items: center;
@@ -1378,8 +1383,19 @@ body {
     min-width: 0;
     flex-wrap: wrap;
 }
+.meta-row > span {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+}
+.version-text {
+    font-size: 28px;
+    font-weight: 600;
+    color: #EDEDED;
+    text-shadow: 1px 1px 0 #191919;
+}
 .via-tag {
-    font-size: 26px;
+    font-size: 22px;
     color: var(--gold);
     background: rgba(255,170,0,0.12);
     border: 1px solid rgba(255,170,0,0.4);
@@ -1392,16 +1408,16 @@ body {
 }
 .latency-num {
     font-family: var(--pixel);
-    font-size: 40px;
-    line-height: 1;
-    letter-spacing: 2px;
+    font-size: 36px;
+    line-height: 1.4;
+    letter-spacing: 0;
     color: var(--green);
     text-shadow: 2px 2px 0 #000;
 }
 .latency-num.lat-mid { color: var(--gold); }
 .latency-num.lat-bad { color: var(--red); }
 .latency-label {
-    font-size: 22px;
+    font-size: 24px;
     color: var(--muted);
     letter-spacing: 2px;
     margin-top: 6px;
@@ -1413,13 +1429,16 @@ body {
     border: 2px solid #151515;
     box-shadow: inset 0 0 0 1px #000;
     padding: 20px 26px;
-    font-size: 34px;
+    font-size: 32px;
     line-height: 1.6;
+}
+.motd-content {
     overflow: hidden;
     display: -webkit-box;
     -webkit-line-clamp: 4;
     -webkit-box-orient: vertical;
-    word-break: break-all;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
 /* ── XP 条样式玩家进度条 ── */
@@ -1433,15 +1452,15 @@ body {
 }
 .xp-nums {
     font-family: var(--pixel);
-    font-size: 42px;
-    line-height: 1;
-    letter-spacing: 2px;
+    font-size: 40px;
+    line-height: 1.4;
+    letter-spacing: 0;
     color: var(--green-xp);
     text-shadow: 2px 2px 0 #000;
     flex: 0 0 auto;
 }
 .xp-nums .fraction {
-    font-size: 20px;
+    font-size: 26px;
     color: var(--muted);
 }
 .xp-track {
@@ -1452,6 +1471,7 @@ body {
     box-shadow: inset 0 2px 0 rgba(255,255,255,0.08);
     box-sizing: border-box;
     min-width: 0;
+    overflow: hidden;
 }
 .xp-fill {
     height: 100%;
@@ -1460,11 +1480,11 @@ body {
 }
 .xp-pct {
     font-family: var(--pixel);
-    font-size: 20px;
+    font-size: 28px;
     color: var(--green-xp);
     text-shadow: 2px 2px 0 #000;
     flex: 0 0 auto;
-    min-width: 70px;
+    min-width: 90px;
     text-align: right;
 }
 
@@ -1474,46 +1494,51 @@ body {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
+    align-items: center;
 }
 .p-chip {
     display: flex;
     align-items: center;
-    gap: 9px;
+    gap: 10px;
     background: rgba(0,0,0,0.42);
     border: 2px solid #262626;
-    padding: 5px 13px 5px 5px;
+    padding: 6px 16px 6px 6px;
     min-width: 0;
+    box-sizing: border-box;
+    max-width: 100%;
+    min-height: 64px;
 }
 .p-head {
-    width: 44px;
-    height: 44px;
+    width: 48px;
+    height: 48px;
     image-rendering: pixelated;
     flex: 0 0 auto;
 }
 .p-fallback {
-    width: 44px;
-    height: 44px;
+    width: 48px;
+    height: 48px;
     box-sizing: border-box;
     display: flex;
     align-items: center;
     justify-content: center;
     font-family: var(--pixel);
-    font-size: 18px;
+    font-size: 20px;
     flex: 0 0 auto;
 }
 .p-name {
-    font-size: 25px;
+    font-size: 28px;
     color: #DDD;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 160px;
+    max-width: 200px;
 }
 .p-more {
     font-family: var(--pixel);
-    font-size: 18px;
+    font-size: 22px;
     color: var(--muted);
     padding: 6px 10px;
+    line-height: 1.5;
 }
 
 /* ── 错误卡: MC 断开连接界面风格 ── */
@@ -1538,6 +1563,8 @@ body {
     font-weight: 700;
     color: #fff;
     text-shadow: 3px 3px 0 #000;
+    max-width: 100%;
+    overflow-wrap: anywhere;
 }
 .err-msg {
     background: rgba(255,85,85,0.08);
@@ -1546,11 +1573,16 @@ body {
     font-size: 32px;
     color: #FF9A9A;
     max-width: 760px;
-    word-break: break-all;
+    box-sizing: border-box;
+    width: 100%;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
 }
 .err-addr {
     font-size: 27px;
     color: var(--muted);
+    max-width: 100%;
+    overflow-wrap: anywhere;
 }
 
 /* ── 页脚: 一行等宽小字 ── */
@@ -1594,7 +1626,7 @@ body {
         <span class="badge">{{ badge }}</span>
       </div>
       <div class="meta-row">
-        <span>{{ server_version|e }}</span>
+        <span class="version-text">{{ server_version|e }}</span>
         {% if client_version and client_version != server_version %}<span>支持 {{ client_version|e }}</span>{% endif %}
         {% if via_hint %}<span class="via-tag">{{ via_hint|e }}</span>{% endif %}
       </div>
@@ -1607,7 +1639,7 @@ body {
     {% endif %}
   </div>
 
-  <div class="motd-chat">{{ motd_html }}</div>
+  <div class="motd-chat"><div class="motd-content">{{ motd_html }}</div></div>
 
   <div class="players-block">
     <div class="xp-row">
@@ -1696,6 +1728,9 @@ body {
     padding: 30px 34px 34px;
     box-sizing: border-box;
     flex: 1 0 auto;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
 }
 .slot {
     background: var(--slot);
@@ -1745,7 +1780,8 @@ body {
     min-width: 0;
 }
 .addr {
-    font-size: 54px;
+    font-size: 42px;
+    line-height: 1.25;
     font-weight: 700;
     color: #fff;
     text-shadow: 3px 3px 0 #000;
@@ -1757,8 +1793,8 @@ body {
 .badge {
     font-family: var(--pixel);
     font-size: 16px;
-    line-height: 1;
-    padding: 6px 11px 5px;
+    line-height: 1.4;
+    padding: 7px 11px;
     background: #191919;
     border: 2px solid var(--accent, var(--muted));
     color: var(--accent, var(--muted));
@@ -1767,7 +1803,8 @@ body {
 }
 .meta-row {
     margin-top: 8px;
-    font-size: 28px;
+    font-size: 25px;
+    line-height: 1.5;
     color: var(--muted);
     display: flex;
     align-items: center;
@@ -1775,8 +1812,19 @@ body {
     min-width: 0;
     flex-wrap: wrap;
 }
+.meta-row > span {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+}
+.version-text {
+    font-size: 28px;
+    font-weight: 600;
+    color: #EDEDED;
+    text-shadow: 1px 1px 0 #191919;
+}
 .via-tag {
-    font-size: 24px;
+    font-size: 22px;
     color: var(--gold);
     background: rgba(255,170,0,0.12);
     border: 1px solid rgba(255,170,0,0.4);
@@ -1789,16 +1837,16 @@ body {
 }
 .latency-num {
     font-family: var(--pixel);
-    font-size: 38px;
-    line-height: 1;
-    letter-spacing: 2px;
+    font-size: 36px;
+    line-height: 1.4;
+    letter-spacing: 0;
     color: var(--green);
     text-shadow: 2px 2px 0 #000;
 }
 .latency-num.lat-mid { color: var(--gold); }
 .latency-num.lat-bad { color: var(--red); }
 .latency-label {
-    font-size: 22px;
+    font-size: 24px;
     color: var(--muted);
     letter-spacing: 2px;
     margin-top: 6px;
@@ -1812,11 +1860,14 @@ body {
     padding: 16px 24px;
     font-size: 32px;
     line-height: 1.55;
+}
+.motd-content {
     overflow: hidden;
     display: -webkit-box;
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;
-    word-break: break-all;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
 .xp-row {
@@ -1828,14 +1879,14 @@ body {
 .xp-nums {
     font-family: var(--pixel);
     font-size: 40px;
-    line-height: 1;
-    letter-spacing: 2px;
+    line-height: 1.4;
+    letter-spacing: 0;
     color: var(--green-xp);
     text-shadow: 2px 2px 0 #000;
     flex: 0 0 auto;
 }
 .xp-nums .fraction {
-    font-size: 19px;
+    font-size: 26px;
     color: var(--muted);
 }
 .xp-track {
@@ -1846,6 +1897,7 @@ body {
     box-shadow: inset 0 2px 0 rgba(255,255,255,0.08);
     box-sizing: border-box;
     min-width: 0;
+    overflow: hidden;
 }
 .xp-fill {
     height: 100%;
@@ -1854,11 +1906,11 @@ body {
 }
 .xp-pct {
     font-family: var(--pixel);
-    font-size: 19px;
+    font-size: 28px;
     color: var(--green-xp);
     text-shadow: 2px 2px 0 #000;
     flex: 0 0 auto;
-    min-width: 68px;
+    min-width: 90px;
     text-align: right;
 }
 
@@ -1876,7 +1928,7 @@ body {
 }
 .sub-grid {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 12px;
 }
 .sub-cell {
@@ -1888,6 +1940,7 @@ body {
     gap: 8px;
     min-width: 0;
     box-sizing: border-box;
+    min-height: 142px;
 }
 .sub-cell.offline {
     opacity: 0.78;
@@ -1924,14 +1977,14 @@ body {
 }
 .sub-players {
     font-family: var(--pixel);
-    font-size: 18px;
-    line-height: 1;
-    letter-spacing: 1px;
+    font-size: 20px;
+    line-height: 1.4;
+    letter-spacing: 0;
     color: var(--green-xp);
     flex: 0 0 auto;
 }
 .sub-players .fraction {
-    font-size: 11px;
+    font-size: 14px;
     color: var(--muted);
 }
 .mini-track {
@@ -1939,13 +1992,22 @@ body {
     background: #131313;
     border: 2px solid #050505;
     box-sizing: border-box;
+    overflow: hidden;
+    flex: 1;
+    min-width: 0;
+}
+.sub-meter {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: auto;
 }
 .mini-fill {
     height: 100%;
     background: repeating-linear-gradient(90deg, #55FF55 0 9px, #43CC43 9px 12px);
 }
 .sub-motd {
-    font-size: 23px;
+    font-size: 21px;
     color: #999;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1955,6 +2017,9 @@ body {
 .sub-offline-text {
     font-size: 23px;
     color: var(--gold);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .sub-error-text {
     font-size: 23px;
@@ -1988,6 +2053,8 @@ body {
     font-weight: 700;
     color: #fff;
     text-shadow: 3px 3px 0 #000;
+    max-width: 100%;
+    overflow-wrap: anywhere;
 }
 .err-msg {
     background: rgba(255,85,85,0.08);
@@ -1996,11 +2063,16 @@ body {
     font-size: 28px;
     color: #FF9A9A;
     max-width: 720px;
-    word-break: break-all;
+    box-sizing: border-box;
+    width: 100%;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
 }
 .err-addr {
     font-size: 25px;
     color: var(--muted);
+    max-width: 100%;
+    overflow-wrap: anywhere;
 }
 
 .foot {
@@ -2049,7 +2121,7 @@ body {
         <span class="badge">PROXY</span>
       </div>
       <div class="meta-row">
-        <span>{{ proxy.server_version|e }}</span>
+        <span class="version-text">{{ proxy.server_version|e }}</span>
         {% if proxy.via_hint %}<span class="via-tag">{{ proxy.via_hint|e }}</span>{% endif %}
       </div>
     </div>
@@ -2061,7 +2133,7 @@ body {
     {% endif %}
   </div>
 
-  <div class="motd-chat">{{ proxy.motd_html }}</div>
+  <div class="motd-chat"><div class="motd-content">{{ proxy.motd_html }}</div></div>
 
   <div class="xp-row">
     <div class="xp-nums">{{ proxy.online_str }}<span class="fraction"> / {{ proxy.max_str }}</span></div>
@@ -2080,18 +2152,17 @@ body {
       <div class="sub-head">
         <span class="dot {% if sub.is_error %}dot-error{% elif sub.is_offline %}dot-offline{% else %}dot-online{% endif %}"></span>
         <span class="sub-name">{{ sub.name|e }}</span>
-        {% if not sub.is_error and not sub.is_offline %}
-        <span class="sub-players">{{ sub.online_str }}<span class="fraction">/{{ sub.max_str }}</span></span>
-        {% endif %}
       </div>
       {% if sub.is_error %}
       <div class="sub-error-text">{{ sub.error_msg|e }}</div>
       {% elif sub.is_offline %}
-      <div class="mini-track"><div class="mini-fill" style="width: 0%"></div></div>
       <div class="sub-offline-text">未启动</div>
       {% else %}
-      <div class="mini-track"><div class="mini-fill" style="width: {{ sub.percent }}%"></div></div>
       <div class="sub-motd">{{ sub.motd_html }}</div>
+      <div class="sub-meter">
+        <div class="mini-track"><div class="mini-fill" style="width: {{ sub.percent }}%"></div></div>
+        <span class="sub-players">{{ sub.online_str }}<span class="fraction">/{{ sub.max_str }}</span></span>
+      </div>
       {% endif %}
     </div>
     {% endif %}
