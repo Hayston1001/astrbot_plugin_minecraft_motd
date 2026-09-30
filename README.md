@@ -5,9 +5,9 @@
 默认直连查询; 支持图片渲染/文本输出; 支持 Java/基岩; 兼容 ViaVersion; 支持代理子服查询
 
 <!-- 随图片同步更新cache buster ?v=版本 -->
-![插件输出图片效果预览图1](https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/assets/preview_java.png?v=1)
-![插件输出图片效果预览图2](https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/assets/preview_bedrock.png?v=1)
-![插件输出图片效果预览图3](https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/assets/preview_proxy.png?v=1)
+![插件输出图片效果预览图1](https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/assets/preview_java.png?v=2)
+![插件输出图片效果预览图2](https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/assets/preview_bedrock.png?v=2)
+![插件输出图片效果预览图3](https://cdn.jsdelivr.net/gh/Hayston1001/astrbot_plugin_minecraft_motd@main/assets/preview_proxy.png?v=2)
 
 ## 功能特性
 
