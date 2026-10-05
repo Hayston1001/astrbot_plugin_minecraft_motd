@@ -26,6 +26,22 @@ import astrbot.api.message_components as Comp
 
 # Java 版标准端口
 JAVA_DEFAULT_PORT = 25565
+
+
+def _read_plugin_version() -> str:
+    """从插件目录的 metadata.yaml 读取版本号(版本号唯一手工来源, 避免多处手动同步)"""
+    try:
+        text = (Path(__file__).resolve().parent / "metadata.yaml").read_text("utf-8")
+    except OSError:
+        return ""
+    m = re.search(r'^version:\s*["\']?([0-9][0-9A-Za-z.\-]*)', text, re.MULTILINE)
+    return m.group(1) if m else ""
+
+
+# 发版只改 metadata.yaml 的 version 字段; main.py 的 @register 与两条启动日志均引用此常量
+PLUGIN_VERSION = _read_plugin_version() or "0.0.0"
+if PLUGIN_VERSION == "0.0.0":
+    logger.warning("[MOTD] 未能从 metadata.yaml 读取版本号, 回退 0.0.0(请检查插件目录完整性)")
 # 基岩版标准端口
 BEDROCK_DEFAULT_PORT = 19132
 
@@ -367,12 +383,23 @@ async def _close_http_session() -> None:
 # 目录规范(AstrBot 插件大文件存储标准):
 #   data/plugin_data/astrbot_plugin_minecraft_motd/avatars/  玩家头像
 #   data/plugin_data/astrbot_plugin_minecraft_motd/icons/    服务器图标
-# 下载时间写入文件 mtime; TTL 仅作为刷新周期: 过期后下次查询尝试重新下载, 
-# 下载失败继续使用旧缓存(文件永不因过期删除, 仅 /motdr 手动清空)
+# 下载时间写入文件 mtime; TTL 仅作为后台刷新周期: 过期后由后台任务静默重新下载
+# (查询路径零网络等待, 新图下次查询生效), 下载失败继续使用旧缓存
+# (文件永不因过期删除, 仅 /motdr 手动清空)
 # ============================================================
 AVATAR_TTL_HOURS_DEFAULT = 12   # 玩家头像刷新周期(小时, 可在配置中调整)
-NEG_CACHE_TTL_MINUTES_DEFAULT = 10   # 头像下载失败负缓存默认时长(分钟, 可在配置 avatar_neg_cache_ttl 中调整, 0=关闭)
+NEG_CACHE_TTL_MINUTES_DEFAULT = 10   # 头像后台下载失败负缓存默认时长(分钟, 可在配置 avatar_neg_cache_ttl 中调整, 0=关闭)
+# 头像后台子系统固定值(v3.4.0 起, 与查询统一死线完全解耦):
+_AVATAR_BG_REQUEST_TIMEOUT = 10.0  # 后台刷新单请求超时(秒): 后台无死线压力, 放宽换成功率
+_AVATAR_BG_CONCURRENCY = 2         # 后台刷新并发上限: 低带宽下限制同时握手数, 不与查询抢占带宽
+_AVATAR_PREHEAT_DELAY = 20.0       # 启动后延迟开始预热的秒数(避开 AstrBot 启动高峰)
+_AVATAR_PREHEAT_PACE = 5.0         # 预热逐张入队节奏(秒): 细水长流, 满名单最坏约 2.5 分钟消化完; 并发闸门 2 才是主力限流
+_AVATAR_PREHEAT_MAX_PLAYERS = 32   # 最近玩家名单容量上限(LRU, 磁盘持久, 供启动预热)
+_RECENT_PLAYERS_FILENAME = "recent_players.json"  # 存于缓存根目录(avatars/ 外, /motdr 不清空)
 _NEG_CACHE: Dict[str, float] = {}
+_AVATAR_BG_SEM = asyncio.Semaphore(_AVATAR_BG_CONCURRENCY)
+_AVATAR_INFLIGHT: set = set()      # 正在后台刷新的缓存键(入队去重)
+_AVATAR_BG_TASKS: set = set()      # 后台任务引用集(防 GC, terminate 时统一取消)
 _MEM_CACHE_MAX_ENTRIES = 1024   # 审计 F035: 内存缓存容量上限(仅内存态, 不涉及磁盘文件)
 
 
@@ -382,11 +409,10 @@ def _put_capped(cache: dict, key, value) -> None:
     while len(cache) > _MEM_CACHE_MAX_ENTRIES:
         oldest = next(iter(cache))
         cache.pop(oldest, None)
-_AVATAR_FETCH_SEM = asyncio.Semaphore(4)  # 头像并发下载上限: 削弱冷缓存时 8 路并发 TLS 握手在单核弱机上的 CPU 尖刺
 
 
-def _get_cache_dir(subdir: str) -> Optional[Path]:
-    """获取缓存子目录(自动创建), 失败返回 None"""
+def _get_cache_dir(subdir: str = "") -> Optional[Path]:
+    """获取缓存子目录(自动创建), 失败返回 None; subdir 为空串返回缓存根目录"""
     base: Path
     try:
         base = Path(StarTools.get_data_dir("astrbot_plugin_minecraft_motd"))
@@ -394,7 +420,7 @@ def _get_cache_dir(subdir: str) -> Optional[Path]:
         logger.warning(f"[MOTD] 获取插件数据目录失败, 回退到相对路径: {e}")
         base = Path("data") / "plugin_data" / "astrbot_plugin_minecraft_motd"
     try:
-        d = base / subdir
+        d = base / subdir if subdir else base
         d.mkdir(parents=True, exist_ok=True)
         return d
     except OSError as e:
@@ -513,8 +539,8 @@ def _avatar_source_urls(uuid: str, name: str) -> list:
     return urls
 
 
-async def _fetch_image_bytes(url: str, timeout: float = 2.5) -> Optional[bytes]:
-    """下载图片字节, 失败返回 None"""
+async def _fetch_image_bytes(url: str, timeout: float = _AVATAR_BG_REQUEST_TIMEOUT) -> Optional[bytes]:
+    """下载图片字节, 失败返回 None(仅头像后台刷新使用, 超时为后台子系统固定值)"""
     try:
         async with _get_http_session().get(
                 url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
@@ -536,85 +562,163 @@ async def _fetch_image_bytes(url: str, timeout: float = 2.5) -> Optional[bytes]:
     return None
 
 
+def _avatar_cache_path(key: str) -> Optional[Path]:
+    """头像磁盘缓存文件路径(缓存目录不可用时返回 None)"""
+    cache_dir = _get_cache_dir("avatars")
+    if cache_dir is None:
+        return None
+    return cache_dir / f"{_safe_filename(key)}.png"
+
+
+def _avatar_cache_fresh(path: Optional[Path], ttl_seconds: int, now: float) -> bool:
+    """磁盘缓存文件是否新鲜(mtime + TTL 判定; 文件缺失/mtime 不可读视为过期)"""
+    if path is None:
+        return False
+    try:
+        return now - path.stat().st_mtime <= ttl_seconds
+    except OSError:
+        return False
+
+
+def _load_recent_players() -> list:
+    """读取最近玩家名单(磁盘持久, 供启动预热; 缺失/损坏返回空列表)"""
+    base = _get_cache_dir("")
+    if base is None:
+        return []
+    try:
+        raw = json.loads((base / _RECENT_PLAYERS_FILENAME).read_text("utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [p for p in raw if isinstance(p, dict) and (p.get("name") or "").strip()]
+
+
+def _remember_recent_players(players: list) -> None:
+    """把本次 sample 玩家并入最近玩家名单(LRU, 原子写盘; 仅供启动预热, 失败不影响查询)"""
+    base = _get_cache_dir("")
+    if base is None:
+        return
+    path = base / _RECENT_PLAYERS_FILENAME
+    try:
+        merged: Dict[str, Dict[str, str]] = {}
+        for item in _load_recent_players():
+            _name = (item.get("name") or "?").strip() or "?"
+            _uuid = item.get("uuid") or ""
+            merged[_uuid or f"n:{_name.lower()}"] = {"name": _name, "uuid": _uuid}
+        for p in players:
+            if not isinstance(p, dict):
+                continue
+            name = (p.get("name") or "").strip()
+            if not name or name == "?":
+                continue
+            uuid = _normalize_uuid(p.get("uuid") or p.get("id") or "")
+            k = uuid or f"n:{name.lower()}"
+            merged.pop(k, None)  # LRU: 已有键重新置尾
+            merged[k] = {"name": name, "uuid": uuid}
+            while len(merged) > _AVATAR_PREHEAT_MAX_PLAYERS:
+                merged.pop(next(iter(merged)))
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(list(merged.values()), ensure_ascii=False), "utf-8")
+        os.replace(tmp, path)
+    except OSError as e:
+        logger.debug(f"[MOTD] 最近玩家名单写入失败(不影响查询): {e}")
+
+
+def _avatar_bg_enqueue(key: str, uuid: str, name: str, neg_ttl_minutes: float) -> bool:
+    """把头像刷新任务入队后台(查询路径零等待). 返回是否真正入队
+
+    入队闸门: 同键在途不重复; 离线模式 UUID 完全跳过(与查询路径判定一致);
+    后台失败负缓存(neg_ttl_minutes, 分钟, 0=关闭)期内不再入队(仅限重试频率, 不影响旧缓存展示).
+    """
+    if key in _AVATAR_INFLIGHT:
+        return False
+    if _is_offline_uuid(uuid, name):
+        return False
+    neg_ttl = max(0.0, float(neg_ttl_minutes)) * 60
+    if neg_ttl > 0 and _NEG_CACHE.get(key, 0) + neg_ttl > time.monotonic():  # 审计 F039: 单调时钟
+        return False
+    _AVATAR_INFLIGHT.add(key)
+    task = asyncio.create_task(_avatar_bg_fetch(key, uuid, name), name=f"motd-avatar-bg:{key}")
+    _AVATAR_BG_TASKS.add(task)
+    task.add_done_callback(_AVATAR_BG_TASKS.discard)
+    return True
+
+
+async def _avatar_bg_fetch(key: str, uuid: str, name: str) -> None:
+    """后台刷新单个头像: 成功写盘缓存(下次查询生效并清负缓存), 失败写负缓存(入队闸门限频)
+
+    无外层总闸: 单请求自带 _AVATAR_BG_REQUEST_TIMEOUT 超时, 逐源串行任务必然有限时长结束;
+    并发闸门 _AVATAR_BG_SEM 限制同时在飞的下载数, 低带宽下不与查询抢占带宽.
+    """
+    try:
+        async with _AVATAR_BG_SEM:
+            for url in _avatar_source_urls(_normalize_uuid(uuid), name):
+                data = await _fetch_image_bytes(url)
+                if data:
+                    path = _avatar_cache_path(key)
+                    if path is not None:
+                        _cache_write(path, data)
+                    _NEG_CACHE.pop(key, None)  # 刷新成功: 清除历史负缓存
+                    logger.debug(f"[MOTD] 头像后台刷新成功: {name}")
+                    return
+        _put_capped(_NEG_CACHE, key, time.monotonic())  # 审计 F039: 单调时钟
+        logger.debug(f"[MOTD] 头像后台刷新失败(负缓存限频): {name}")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.debug(f"[MOTD] 头像后台刷新异常: {name} {e}")
+    finally:
+        _AVATAR_INFLIGHT.discard(key)
+
+
 async def get_player_avatars(players: list, ttl_hours: float = AVATAR_TTL_HOURS_DEFAULT,
                              neg_ttl_minutes: float = NEG_CACHE_TTL_MINUTES_DEFAULT) -> Dict[str, str]:
-    """批量获取玩家头像 data URI(磁盘持久缓存 + 多源回退 + 失败负缓存)
+    """批量获取玩家头像 data URI(磁盘持久缓存 + 后台异步刷新, 查询路径零网络等待)
 
-    TTL 语义(stale-while-revalidate): TTL 仅作为刷新周期——
-    - 缓存未过期: 直接使用, 不发起下载; 
-    - 已过期或无缓存: 本次查询尝试重新下载; 
-    - 离线模式 UUID(盗版服按名推导): 本地判定后完全跳过下载, 渲染用占位块; 
-    - 下载失败/超时: 有旧缓存则继续用旧缓存, 从未成功获取过才用占位块; 
-    - 下载失败负缓存(neg_ttl_minutes, 分钟, 0=关闭): 失败后该时长内不再重试, 仅限制重试频率, 不影响旧缓存展示. 
+    TTL 语义(stale-while-revalidate 完整形态, v3.4.0 起): TTL 仅作为后台刷新周期——
+    - 缓存存在(无论是否过期): 直接用于本次展示, 查询路径不做任何网络请求; 
+    - 缓存未过期: 结束, 不发起任何动作; 
+    - 缓存已过期: 展示旧图的同时入队后台刷新(新图写盘后下次查询生效); 
+    - 从未缓存过: 本次渲染用占位块/浏览器回退, 同时入队后台下载(延迟一拍出现); 
+    - 入队闸门: 后台失败负缓存(neg_ttl_minutes, 分钟, 0=关闭)内不再入队; 离线模式 UUID(盗版服按名推导)本地判定后完全跳过; 同键在途不重复; 
     - 缓存文件永不因过期删除(仅 /motdr 手动清空). 
+    同时把玩家并入磁盘最近玩家名单, 供启动预热(见 _preheat_avatars).
 
     players: [{"name": str, "uuid": str}, ...]
-    返回: {缓存键: data:image/png;base64,...}
+    返回: {缓存键: data:image/png;base64,...}(缺失键由模板回退渲染)
     """
     ttl = max(1, int(ttl_hours * 3600))
-    neg_ttl = max(0.0, float(neg_ttl_minutes)) * 60  # 负缓存时长(秒), 0=关闭负缓存
-    cache_dir = _get_cache_dir("avatars")
-
     result: Dict[str, str] = {}
-    todo: Dict[str, Tuple[str, str]] = {}  # key -> (uuid, name)
     offline_names: list = []  # 本次检测到的离线模式玩家名(仅用于日志)
-    now = time.time()            # 墙钟: 与磁盘文件 mtime 比较
-    now_mono = time.monotonic()  # 审计 F039: 单调时钟: 内存负缓存 TTL(不受 NTP 跳变影响)
+    enqueued = 0
+    now = time.time()         # 墙钟: 与磁盘文件 mtime 比较
+    _remember_recent_players(players)
     for p in players:
         if not isinstance(p, dict):
             continue
         name = (p.get("name") or "?").strip() or "?"
         uuid = p.get("uuid") or p.get("id") or ""
         key = _avatar_cache_key(uuid, name)
-        path = cache_dir / f"{_safe_filename(key)}.png" if cache_dir else None
+        path = _avatar_cache_path(key)
         data = _cache_read_any(path) if path else None
         if data is not None:
             result[key] = "data:image/png;base64," + base64.b64encode(data).decode()
-            try:
-                stale = now - path.stat().st_mtime > ttl
-            except OSError:
-                stale = True
-            if not stale:
-                continue  # 缓存未过期: 直接使用, 不发起下载
-        # 无缓存或已过期: 尝试刷新(负缓存仅限制重试频率, 不影响旧缓存展示)
-        if neg_ttl > 0 and _NEG_CACHE.get(key, 0) + neg_ttl > now_mono:
-            continue
+            if _avatar_cache_fresh(path, ttl, now):
+                continue  # 缓存未过期: 直接使用, 不发起任何动作
+        # 无缓存或已过期: 本次照常用旧图/占位块, 刷新移入后台(查询路径零等待)
         if _is_offline_uuid(uuid, name):
             # 离线模式 UUID(盗版服): Mojang 库无此档案, UUID 头像源必然 404, 
-            # 直接跳过下载(渲染时用占位块); 纯本地判定零网络成本, 也不进负缓存
+            # 跳过下载与预热入队(渲染用占位块); 纯本地判定零网络成本, 也不进负缓存
             offline_names.append(name)
             continue
-        todo[key] = (uuid, name)
+        if _avatar_bg_enqueue(key, uuid, name, neg_ttl_minutes):
+            enqueued += 1
 
     if offline_names:
         logger.debug(f"[MOTD] 检测到离线模式玩家(盗版服 UUID), 跳过头像下载: {', '.join(offline_names)}")
-
-    if not todo:
-        return result
-
-    async def _fetch_one(key: str, uuid: str, name: str) -> None:
-        # 并发闸门: 限制同时在飞的下载/TLS 握手数, 避免冷缓存时瞬时 CPU 尖刺拖慢单核弱机
-        async with _AVATAR_FETCH_SEM:
-            for url in _avatar_source_urls(_normalize_uuid(uuid), name):
-                data = await _fetch_image_bytes(url)
-                if data:
-                    result[key] = "data:image/png;base64," + base64.b64encode(data).decode()
-                    if cache_dir is not None:
-                        _cache_write(cache_dir / f"{_safe_filename(key)}.png", data)
-                    return
-            _put_capped(_NEG_CACHE, key, time.monotonic())  # 审计 F039: 单调时钟
-        # 三源均失败才走到这里(成功路径在块内 return); 磁盘有旧缓存时下次读取自动沿用,
-        # 故不再区分"刷新失败/首次失败"——旧实现"继续使用旧缓存"分支实际不可达
-        logger.debug(f"[MOTD] 玩家头像三源均下载失败(沿用旧缓存或渲染用占位块): {name}")
-    # 并发拉取(最多 _AVATAR_FETCH_SEM 路同时在飞); 整体限时, 超时的玩家沿用旧缓存/占位块, 已完成的正常缓存
-    try:
-        await asyncio.wait_for(
-            asyncio.gather(*(_fetch_one(k, u, n) for k, (u, n) in todo.items())),
-            timeout=4.0,
-        )
-    except asyncio.TimeoutError:
-        missed = len(todo) - sum(1 for k in todo if k in result)
-        logger.info(f"[MOTD] 玩家头像批量获取超时, {missed} 个沿用旧缓存/占位块")
+    if enqueued:
+        logger.debug(f"[MOTD] 头像后台刷新入队 {enqueued} 个(新图下次查询生效)")
     return result
 
 
@@ -2182,7 +2286,7 @@ body {
 PROXY_HTML_TEMPLATE = _PROXY_TEMPLATE_SRC.replace("__DIRT_TILE__", _DIRT_TILE)
 
 
-@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件, 支持 ViaVersion/Velocity/BungeeCord 多版本兼容", "3.2.0")
+@register("astrbot_plugin_minecraft_motd", "MOTD查询", "查询 Minecraft 服务器状态的 AstrBot 插件, 支持 ViaVersion/Velocity/BungeeCord 多版本兼容", PLUGIN_VERSION)
 class MOTDPlugin(Star):
     """MOTD 查询插件主类"""
 
@@ -2195,8 +2299,9 @@ class MOTDPlugin(Star):
         self.config = config
         # 发送闸门: 串行化「渲染+发送」段, 群聊多人同时查询时不再叠加渲染/上传开销(渲染失败有文本回退, 不会永久占用)
         self._send_semaphore = asyncio.Semaphore(1)
+        self._avatar_preheat_task: Optional[asyncio.Task] = None  # 启动预热任务(on_astrbot_loaded 调度, terminate 取消)
         self._load_config()
-        logger.info(f"[MOTD] 插件初始化完成, 版本 3.2.0")
+        logger.info(f"[MOTD] 插件初始化完成, 版本 {PLUGIN_VERSION}")
     
     def _load_config(self):
         """加载插件配置"""
@@ -2771,7 +2876,7 @@ class MOTDPlugin(Star):
             logger.error(f"[MOTD] 查询异常: {server_address} {e}", exc_info=True)
             result = {"error": f"查询异常: {str(e)}"}
 
-        # 预取玩家头像(磁盘缓存命中则零开销), 渲染时内嵌 data URI, 
+        # 头像磁盘缓存命中即用(查询路径零网络开销), 过期/缺失项入队后台静默刷新(新图下次查询生效),
         # 避免渲染服务器的浏览器临时拉取 mc-heads 失败/限流导致头像缺失
         avatar_map: Dict[str, str] = {}
         if (self.prefetch_avatars and self.show_player_list and is_java
@@ -2779,7 +2884,7 @@ class MOTDPlugin(Star):
             try:
                 _sample = result.get("players", {}).get("sample", []) or []
                 avatar_map = await get_player_avatars(_sample[:8], self.avatar_cache_ttl, self.avatar_neg_cache_ttl)
-                logger.debug(f"[MOTD] 头像预取完成: {len(avatar_map)}/{min(len(_sample), 8)} 个")
+                logger.debug(f"[MOTD] 头像缓存命中: {len(avatar_map)}/{min(len(_sample), 8)} 个")
             except Exception as e:
                 logger.warning(f"[MOTD] 玩家头像预取失败(不影响查询结果): {e}")
 
@@ -3209,7 +3314,7 @@ class MOTDPlugin(Star):
         """Bot 初始化完成时"""
         # 启动横幅仅 2 行 INFO(+ 代理模式 1 行): 详细配置在 _load_config 的 DEBUG 留档与 WebUI 配置页
         _default_disp = f"{self.default_server}:{self.default_port}" if self.default_server else "未设置"
-        logger.info("[MOTD] 插件已加载 v3.2.0(Java/基岩 MOTD 查询, ViaVersion/Velocity/BungeeCord 多版本兼容)")
+        logger.info(f"[MOTD] 插件已加载 v{PLUGIN_VERSION}(Java/基岩 MOTD 查询, ViaVersion/Velocity/BungeeCord 多版本兼容)")
         logger.info(f"[MOTD] 配置摘要: 默认服务器={_default_disp}, 查询类型={self.query_type}, 超时={self.query_timeout}s, "
                     f"输出模式={'图片' if self.output_mode == 'image' else '文本'}, API回退={'开' if self.use_api else '关'}, "
                     f"头像预取={'开' if self.prefetch_avatars else '关'}, 生效范围={'全部会话' if self.enable_all_sessions else '白名单'}")
@@ -3217,8 +3322,55 @@ class MOTDPlugin(Star):
             _proxy_detail = (self.velostat_api_url or "未配置") if self.proxy_query_method == "velostat" \
                 else f"{len(self.sub_servers_config.split(',')) if self.sub_servers_config else 0} 个子服配置"
             logger.info(f"[MOTD] 代理模式: 方式={self.proxy_query_method}, 详情={_proxy_detail}")
+        # 启动预热(v3.4.0): 低优先级后台逐张刷新最近玩家头像, 重启/长期无查询后首查命中率拉满
+        if self.prefetch_avatars and self.show_player_list and self.output_mode == "image":
+            self._avatar_preheat_task = asyncio.create_task(self._preheat_avatars())
+
+    async def _preheat_avatars(self) -> None:
+        """启动预热: 按磁盘最近玩家名单逐张入队后台刷新(限速), 长期无查询/重启后首查命中率拉满
+
+        仅检查过期/缺失项(读盘判定, 与查询路径同一标准); 新鲜项直接跳过不占节奏;
+        负缓存/离线模式/在途的名单项由 _avatar_bg_enqueue 闸门自动过滤.
+        """
+        try:
+            await asyncio.sleep(_AVATAR_PREHEAT_DELAY)
+            recent = _load_recent_players()
+            if not recent:
+                logger.debug("[MOTD] 头像预热跳过: 暂无最近玩家名单")
+                return
+            ttl = max(1, int(self.avatar_cache_ttl * 3600))
+            now = time.time()
+            queued = 0
+            for p in recent:
+                name = (p.get("name") or "?").strip() or "?"
+                uuid = p.get("uuid") or ""
+                key = _avatar_cache_key(uuid, name)
+                path = _avatar_cache_path(key)
+                if _cache_read_any(path) is not None and _avatar_cache_fresh(path, ttl, now):
+                    continue  # 缓存存在且新鲜: 跳过, 不占入队节奏
+                if _avatar_bg_enqueue(key, uuid, name, self.avatar_neg_cache_ttl):
+                    queued += 1
+                    await asyncio.sleep(_AVATAR_PREHEAT_PACE)
+            if queued:
+                logger.info(f"[MOTD] 头像预热完成: 名单 {len(recent)} 人, 入队后台刷新 {queued} 个")
+            else:
+                logger.debug(f"[MOTD] 头像预热: 名单 {len(recent)} 人, 缓存全部新鲜, 无需刷新")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug(f"[MOTD] 头像预热异常(不影响使用): {e}")
 
     async def terminate(self):
-        """插件被禁用/重载时释放资源: 关闭共享 HTTP 会话"""
+        """插件被禁用/重载时释放资源: 取消头像后台任务后关闭共享 HTTP 会话"""
+        tasks = list(_AVATAR_BG_TASKS)
+        if self._avatar_preheat_task is not None:
+            tasks.append(self._avatar_preheat_task)
+            self._avatar_preheat_task = None
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        _AVATAR_BG_TASKS.clear()
+        _AVATAR_INFLIGHT.clear()
         await _close_http_session()
         logger.info("[MOTD] 插件已卸载, 共享 HTTP 会话已关闭")

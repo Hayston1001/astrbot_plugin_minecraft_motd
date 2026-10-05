@@ -89,21 +89,21 @@
     "prefetch_avatars": {
         "description": "预取玩家头像",
         "type": "bool",
-        "hint": "插件预先下载玩家头像并内嵌到渲染图, 命中缓存零开销",
+        "hint": "头像从本地磁盘嵌入, 否则由 AstrBot 云端渲染(成功率低)",
         "default": true,
         "condition": {"output_mode": "image"}
     },
     "avatar_cache_ttl": {
         "description": "头像刷新周期(小时)",
         "type": "int",
-        "hint": "超过该时长后重新下载头像, 失败则使用旧缓存. 用 /motdr 刷新缓存",
+        "hint": "缓存超过该时长后开始后台刷新",
         "default": 12,
         "condition": {"output_mode": "image"}
     },
     "avatar_neg_cache_ttl": {
         "description": "头像下载失败负缓存(分钟)",
         "type": "int",
-        "hint": "头像下载失败后, 该时长内不再重复尝试下载",
+        "hint": "头像后台下载失败后, 该时长内不再重试",
         "default": 30,
         "condition": {"output_mode": "image"}
     },
