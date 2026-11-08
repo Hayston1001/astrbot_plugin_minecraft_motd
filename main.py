@@ -3153,24 +3153,29 @@ class MOTDPlugin(Star):
     async def on_message(self, event: AstrMessageEvent):
         """处理纯文本触发词与自定义斜杠指令。"""
         message = event.message_str.strip()
-        has_slash = message.startswith("/") or self._is_slash_message(event)
-        if message.startswith("/"):
-            message = message[1:]
+        original = (getattr(event.message_obj, "message_str", "") or "").strip()
+        candidates = (message,)
+        if original and original != message and not original.startswith("/"):
+            # AstrBot 可能已从 event.message_str 剥掉触发词开头的唤醒前缀。
+            candidates = (original, message)
 
-        match = re.fullmatch(r"(\S+)(?:\s+(.+))?", message)
-        if not match:
-            return
-        trigger = match[1].lower()
-        if has_slash and trigger in _DEFAULT_QUERY_TRIGGERS:
-            # 内置斜杠命令由 AstrBot 的指令处理器负责，避免重复查询。
-            return
-        is_java = self.query_triggers.get(trigger)
-        if is_java is None:
-            return
+        is_slash_message = self._is_slash_message(event)
+        for candidate in candidates:
+            match = re.fullmatch(r"(\S+)(?:\s+(.+))?", candidate.removeprefix("/"))
+            if not match:
+                continue
+            trigger = match[1].lower()
+            if trigger in _DEFAULT_QUERY_TRIGGERS and (is_slash_message or candidate.startswith("/")):
+                # 内置斜杠命令由 AstrBot 的指令处理器负责，避免重复查询。
+                return
+            is_java = self.query_triggers.get(trigger)
+            if is_java is None:
+                continue
 
-        server = match[2].strip() if match[2] else ""
-        logger.debug(f"[MOTD] 匹配到查询触发词: {message}")
-        await self._do_motd_query(event, server, is_java=is_java)
+            server = match[2].strip() if match[2] else ""
+            logger.debug(f"[MOTD] 匹配到查询触发词: {candidate}")
+            await self._do_motd_query(event, server, is_java=is_java)
+            return
 
     @filter.command("motd")
     async def motd_query_cmd(self, event: AstrMessageEvent, server: str = ""):
