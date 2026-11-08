@@ -1,4 +1,16 @@
 {
+    "java_triggers": {
+        "description": "Java 版查询触发词",
+        "type": "list",
+        "hint": "每项一个触发词，例如 查服。填写时省略斜杠，词内不能含空格。清空列表可关闭 Java 版查询指令。",
+        "default": ["motd"]
+    },
+    "bedrock_triggers": {
+        "description": "基岩版查询触发词",
+        "type": "list",
+        "hint": "每项一个触发词，例如 查基岩。填写时省略斜杠，词内不能含空格。清空列表可关闭基岩版查询指令。",
+        "default": ["motd-bedrock", "motdb"]
+    },
     "default_server": {
         "description": "默认查询的 Minecraft 服务器地址",
         "type": "string",

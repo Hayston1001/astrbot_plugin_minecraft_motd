@@ -11,7 +11,7 @@
 
 ## 功能特性
 
-- **无需斜杠**: 直接输入 `motd` 即可, 无需 `/`
+- **自定义触发词**: Java 版和基岩版分别配置, 支持中文和多个触发词(v3.5+)
 - **直连查询**: 支持失败回退 API 查询
 - **支持 SRV**: 直连查询自动解析 SRV 记录(与原版客户端行为一致), 显式指定端口时不查询 SRV(v2.4+)
 - **像素风卡片**: 泥土纹理背景 + MC GUI 浮雕面板 + 物品栏格子槽 + XP 条式玩家进度条(v2+)
@@ -30,10 +30,12 @@
 
 ## QQ 官方机器人使用前提
 
-在 QQ 官方机器人(bot.q.qq.com)的群里使用无斜杠 `motd` 指令, 需要在 **手机 QQ 群设置** 中：
+在 QQ 官方机器人(bot.q.qq.com)的群里使用无需 @机器人的查询指令, 需要在 **手机 QQ 群设置** 中：
 
 1. 开启「**机器人主动在群聊内发言**」
 2. 消息范围设置为「**获取群内全部消息**」(否则仅 @机器人 可触发)
+
+使用 Webhook 接入时, 还需在 QQ 开放平台的回调配置中勾选 `GROUP_MESSAGE_CREATE` 群事件。
 
 > [!NOTE]
 > 图片卡片经 AstrBot 图床以公网 URL 发送, QQ 官方平台仅支持 png/jpg 格式, 本插件固定输出 png, 无需额外配置. 
@@ -109,14 +111,16 @@
 |--------|------|--------|
 | `default_server` | 默认服务器地址 | `n.rainplay.cn` |
 | `default_port` | 默认服务器端口 | `46861` |
+| `java_triggers` | Java 版查询触发词 | `["motd"]` |
+| `bedrock_triggers` | 基岩版查询触发词 | `["motd-bedrock", "motdb"]` |
 | `query_type` | 查询类型 | `normal` |
 | `proxy_query_method` | 代理查询方式 | `velostat` |
 | `velostat_api_url` | velostat API 地址 | `http://代理IP:8080` |
 | `sub_servers` | 子服地址列表 | `lobby:host:port,survival:host:port` |
 | `enable_all_sessions` | 对所有会话生效 | true |
 | `enabled_sessions` | 会话白名单(关闭"对所有会话生效"后生效, 填会话 ID, 可用 `/sid` 获取) | `[]` |
-| `admin_only_config` | 仅管理员可修改本插件配置(影响 `/motdconfig` 指令) | true |
-| `use_api` | 直连失败后兜底: 回退调用 mcstatus.io API | true |
+| `admin_only_config` | 兼容配置项; `/motdconfig` 和 `/motdr` 始终仅管理员可用 | true |
+| `use_api` | Java 版直连失败后回退调用 mcstatus.io API | true |
 | `output_mode` | 输出模式: `image` 渲染像素风图片卡片 / `text` 纯文本(跳过渲染与头像预取, 几乎零开销) | `image` |
 | `card_height_mode` | 卡片高度: `auto` 随内容自适应(紧凑无留白) / `fixed` 固定高度 720px(玩家少时补白, 尺寸统一) | `auto` |
 | `show_server_icon` | 显示服务器图标 | true |
@@ -199,7 +203,26 @@
 
 ## 使用方法
 
-### 基础指令(无需斜杠)
+### 自定义查询触发词
+
+在 AstrBot WebUI 的插件配置中分别设置 Java 版和基岩版的查询触发词，保存后重载插件。例如：
+
+```json
+{
+    "java_triggers": ["motd", "查服"],
+    "bedrock_triggers": ["查基岩", "motdb"]
+}
+```
+
+- 发送 `查服` 或 `/查服` 查询默认服务器；在触发词后加空格和地址可查询指定服务器，例如 `查基岩 mc.example.com:19132`。
+- 配置时每项填写一个触发词，不含空格和斜杠。Java 版与基岩版请使用不同的词。
+- 保留默认触发词可继续使用原指令；移除即可停用。清空列表可关闭对应版本的查询指令。
+
+默认服务器地址和端口由两个版本共用；查询基岩版默认服务器时，请将默认端口设为该服务器的端口（通常为 19132）。
+
+### 默认查询指令（无需斜杠）
+
+以下指令适用于保留默认触发词的配置。
 
 | 指令 | 说明 | 示例 |
 |------|------|------|
@@ -211,7 +234,7 @@
 | `motdb` | 查询默认基岩版服务器(`motd-bedrock` 的短别名) | `motdb` |
 | `motdb <地址:端口>` | 查询指定基岩版服务器(`motd-bedrock` 的短别名) | `motdb mc.example.com:19132` |
 
-### 带斜杠前缀的指令
+### 默认查询指令（带斜杠）
 
 | 指令 | 说明 |
 |------|------|
@@ -246,14 +269,14 @@
 
 3. **检查日志级别**
    - INFO 级别下发送 motd 查询, 应看到成对的 `[MOTD] 开始查询: ...` 与 `[MOTD] 查询完成: ...`; 没有则说明指令未被触发
-   - 指令路由细节(如 `[MOTD] 匹配到 motd 指令`、`[MOTD] 收到 /motd 指令`)为 DEBUG 级别, 在 `data/cmd_config.json` 中设置 `"log_level": "DEBUG"` 并重启后可见
+   - 指令路由细节(如 `[MOTD] 匹配到查询触发词`、`[MOTD] 收到 /motd 指令`)为 DEBUG 级别, 可在 AstrBot WebUI 的「系统设置 → 常规 → 日志」中将控制台日志级别设为 `DEBUG`
 
 4. **检查白名单**
    - 如果关闭了"对所有会话生效", 需要将会话 ID(不是 QQ 号)加入 `enabled_sessions` 白名单, 会话 ID 可用 `/sid` 指令获取
    - 或者在 WebUI 中重新开启"对所有会话生效"
 
 5. **QQ 官方机器人**
-   - 确认群设置已开启「机器人主动在群聊内发言」与「获取群内全部消息」(见上文使用前提)
+   - 确认群设置已开启「机器人主动在群聊内发言」与「获取群内全部消息」; Webhook 接入还需订阅 `GROUP_MESSAGE_CREATE` 事件(见上文使用前提)
 
 ### 问题：ViaVersion 服务器版本显示异常？
 
@@ -265,7 +288,7 @@
 **排查步骤：**
 
 1. **查看版本解析日志(DEBUG 级别)**
-   - 在 `data/cmd_config.json` 中设置 `"log_level": "DEBUG"` 并重启, 发送查询后在日志中搜索 `[MOTD] 版本解析输出`
+   - 在 AstrBot WebUI 的「系统设置 → 常规 → 日志」中将控制台日志级别设为 `DEBUG`, 发送查询后在日志中搜索 `[MOTD] 版本解析输出`
    - DEBUG 日志会显示完整的解析链路：
      ```
      [MOTD] API 返回原始数据: version.name_raw='Velocity 1.7.2-1.21.4', version.name_clean='...', version.name='...', version.protocol=null
@@ -300,7 +323,7 @@
 ### 问题：查询超时或连接被拒绝？
 
 1. 确认服务器地址和端口是否正确
-2. 保持 `use_api: true`(默认开启)开启 API 失败回退(直连查询失败时自动回退调用 mcstatus.io API, 直连被墙/被过滤的外服也可获取状态)
+2. Java 版可保持 `use_api: true`(默认开启), 直连失败且仍有剩余查询时间时回退调用 mcstatus.io API
 3. 增加 `query_timeout` 配置值
 4. 检查服务器是否在线
 5. 检查 AstrBot 运行的网络环境
@@ -320,7 +343,7 @@
 插件输出的所有日志都以 `[MOTD]` 为前缀, 按级别分层：
 
 - **INFO**: 精简主干, 每次查询通常只有「开始查询 + 查询完成」两条(发生直连失败回退 API 或代理子服查询时, 另加对应行)
-- **DEBUG**: 详细诊断(指令路由、SRV 解析、版本解析链路、原始数据等), 默认不显示; 在 `data/cmd_config.json` 中设置 `"log_level": "DEBUG"` 并重启后可见
+- **DEBUG**: 详细诊断(指令路由、SRV 解析、版本解析链路、原始数据等), 默认不显示; 可在 AstrBot WebUI 的「系统设置 → 常规 → 日志」中将控制台日志级别设为 `DEBUG`
 - **WARNING**: 可自动恢复的降级(缓存写入失败、畸形数据丢弃等)
 - **ERROR**: 最终失败(发送失败、查询异常等, 附完整堆栈)
 
@@ -367,7 +390,7 @@
 ### 诊断细节日志(DEBUG)
 
 ```
-[MOTD] 匹配到 motd 指令: motd mc.example.com              # 无斜杠指令路由
+[MOTD] 匹配到查询触发词: motd mc.example.com              # 无斜杠指令路由
 [MOTD] 收到 /motd 指令: server='mc.example.com'           # 斜杠指令路由
 [MOTD] 使用指定服务器: mc.example.com:25565
 [MOTD] SRV 解析成功: mc.example.com -> play.example.com:25565

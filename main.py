@@ -45,6 +45,14 @@ if PLUGIN_VERSION == "0.0.0":
 # 基岩版标准端口
 BEDROCK_DEFAULT_PORT = 19132
 
+_DEFAULT_JAVA_TRIGGERS = ("motd",)
+_DEFAULT_BEDROCK_TRIGGERS = ("motd-bedrock", "motdb")
+_DEFAULT_QUERY_TRIGGERS = {
+    **dict.fromkeys(_DEFAULT_JAVA_TRIGGERS, True),
+    **dict.fromkeys(_DEFAULT_BEDROCK_TRIGGERS, False),
+}
+_ADMIN_TRIGGERS = {"motdconfig", "motdr"}
+
 # ============================================================
 # 协议号 → 版本名 完整映射(2026-06 更新)
 # 格式: protocol: (显示版本, 主版本号)
@@ -2307,6 +2315,7 @@ class MOTDPlugin(Star):
         """加载插件配置"""
         self.default_server = self.config.get("default_server", "")
         self.default_port = self.config.get("default_port", JAVA_DEFAULT_PORT)
+        self.query_triggers = self._load_query_triggers()
         self.enabled_sessions = self.config.get("enabled_sessions", [])
         self.enable_all_sessions = self.config.get("enable_all_sessions", True)
         self.admin_only_config = self.config.get("admin_only_config", True)
@@ -2347,6 +2356,27 @@ class MOTDPlugin(Star):
         logger.debug(f"[MOTD] 配置加载: default_server='{self.default_server}', port={self.default_port}, "
                      f"查询类型={self.query_type}, 代理方式={self.proxy_query_method}, API回退={'开' if self.use_api else '关'}")
     
+    def _load_query_triggers(self) -> dict[str, bool]:
+        """将有效触发词映射到查询版本，True 为 Java 版。"""
+        triggers = {}
+        for key, defaults, is_java in (
+            ("java_triggers", _DEFAULT_JAVA_TRIGGERS, True),
+            ("bedrock_triggers", _DEFAULT_BEDROCK_TRIGGERS, False),
+        ):
+            configured = self.config.get(key)
+            words = configured if isinstance(configured, list) else defaults
+            for word in words:
+                trigger = word.strip().lower() if isinstance(word, str) else ""
+                if not re.fullmatch(r"[^\s/]+", trigger) or trigger in _ADMIN_TRIGGERS:
+                    logger.warning(f"[MOTD] {key} 中有无效触发词，已忽略: {word!r}")
+                    continue
+                existing_edition = _DEFAULT_QUERY_TRIGGERS.get(trigger, triggers.get(trigger, is_java))
+                if existing_edition != is_java:
+                    logger.warning(f"[MOTD] {key} 中的触发词与另一版本冲突，已忽略: {word!r}")
+                    continue
+                triggers[trigger] = is_java
+        return triggers
+
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         """检查用户是否为管理员"""
         try:
@@ -2828,7 +2858,7 @@ class MOTDPlugin(Star):
             if not self.default_server:
                 await event.send(self._plain_chain(event,
                     f"{self._emoji(event, 'fail')} 未设置默认服务器\n"
-                    "请使用: motd <服务器地址:端口> 查询指定服务器\n"
+                    "请在查询触发词后加空格和服务器地址（可带端口）\n"
                     "或联系管理员使用 /motdconfig default <地址:端口> 设置"
                 ))
                 return
@@ -2921,7 +2951,7 @@ class MOTDPlugin(Star):
             if not self.default_server:
                 await event.send(self._plain_chain(event,
                     f"{self._emoji(event, 'fail')} 未设置默认服务器\n"
-                    "请使用: motd <服务器地址:端口> 查询代理服务器\n"
+                    "请在查询触发词后加空格和代理服务器地址（可带端口）\n"
                     "或联系管理员使用 /motdconfig default <地址:端口> 设置"
                 ))
                 return
@@ -3121,48 +3151,37 @@ class MOTDPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
-        """监听所有消息, 处理无斜杠前缀的 motd 指令"""
+        """处理纯文本触发词与自定义斜杠指令。"""
         message = event.message_str.strip()
-        
-        # 获取原始消息链, 检查第一个消息段
-        # 获取原始消息链, 检查第一个消息段(审计 F056: 裸 except 收窄为 Exception)
-        try:
-            message_chain = event.message_obj.message
-            if message_chain and len(message_chain) > 0:
-                first_seg = message_chain[0]
-                # 如果第一个消息段是 Plain 且以 / 开头, 跳过(这是指令消息)
-                if hasattr(first_seg, 'text') and first_seg.text and first_seg.text.startswith('/'):
-                    return
-        except Exception:
-            pass
-        
-        # 简单文本检查: 如果以 / 开头, 跳过
-        if message.startswith('/'):
+        original = (getattr(event.message_obj, "message_str", "") or "").strip()
+        candidates = (message,)
+        if original and original != message and not original.startswith("/"):
+            # AstrBot 可能已从 event.message_str 剥掉触发词开头的唤醒前缀。
+            candidates = (original, message)
+
+        is_slash_message = self._is_slash_message(event)
+        for candidate in candidates:
+            match = re.fullmatch(r"(\S+)(?:\s+(.+))?", candidate.removeprefix("/"))
+            if not match:
+                continue
+            trigger = match[1].lower()
+            if trigger in _DEFAULT_QUERY_TRIGGERS and (is_slash_message or candidate.startswith("/")):
+                # 内置斜杠命令由 AstrBot 的指令处理器负责，避免重复查询。
+                return
+            is_java = self.query_triggers.get(trigger)
+            if is_java is None:
+                continue
+
+            server = match[2].strip() if match[2] else ""
+            logger.debug(f"[MOTD] 匹配到查询触发词: {candidate}")
+            await self._do_motd_query(event, server, is_java=is_java)
             return
-        
-        # 检查消息是否以 motd 开头(不区分大小写)
-        if not re.match(r'^motd', message, re.IGNORECASE):
-            return
-        
-        # 匹配 motd 指令模式(motdb 为 motd-bedrock 的短别名)
-        motd_pattern = r'^(motdb|motd-bedrock|motd)(?:\s+(.+))?$'
-        match = re.match(motd_pattern, message, re.IGNORECASE)
-        
-        if match:
-            logger.debug(f"[MOTD] 匹配到 motd 指令: {message}")
-            # 审计 F010: 只看指令 token(motd-bedrock 或其短别名 motdb)是否为基岩,
-            # 不再检查整条消息子串, 避免地址里恰好含 '-bedrock' 的 Java 服被误路由到基岩 UDP 查询
-            is_bedrock = match.group(1).lower() != 'motd'
-            server = match.group(2).strip() if match.group(2) else ""
-            
-            await self._do_motd_query(event, server, is_java=not is_bedrock)
 
     @filter.command("motd")
     async def motd_query_cmd(self, event: AstrMessageEvent, server: str = ""):
         """MOTD 查询指令(带斜杠前缀)"""
         # 审计 F011: WakingCheckStage 会剥离唤醒前缀, 斜杠判定须检查消息链首段原始文本
-        if not self._is_slash_message(event):
-            logger.debug(f"[MOTD] /motd 指令被跳过(消息不以 / 开头)")
+        if "motd" not in self.query_triggers or not self._is_slash_message(event):
             return
         
         logger.debug(f"[MOTD] 收到 /motd 指令: server='{server}'")
@@ -3172,8 +3191,7 @@ class MOTDPlugin(Star):
     async def motd_bedrock_query_cmd(self, event: AstrMessageEvent, server: str = ""):
         """基岩版 MOTD 查询指令(带斜杠前缀)"""
         # 审计 F011: WakingCheckStage 会剥离唤醒前缀, 斜杠判定须检查消息链首段原始文本
-        if not self._is_slash_message(event):
-            logger.debug(f"[MOTD] /motd-bedrock 指令被跳过(消息不以 / 开头)")
+        if "motd-bedrock" not in self.query_triggers or not self._is_slash_message(event):
             return
         
         logger.debug(f"[MOTD] 收到 /motd-bedrock 指令: server='{server}'")
@@ -3183,8 +3201,7 @@ class MOTDPlugin(Star):
     async def motdb_query_cmd(self, event: AstrMessageEvent, server: str = ""):
         """基岩版 MOTD 查询指令 motd-bedrock 的短别名(带斜杠前缀)"""
         # 审计 F011: WakingCheckStage 会剥离唤醒前缀, 斜杠判定须检查消息链首段原始文本
-        if not self._is_slash_message(event):
-            logger.debug(f"[MOTD] /motdb 指令被跳过(消息不以 / 开头)")
+        if "motdb" not in self.query_triggers or not self._is_slash_message(event):
             return
         
         logger.debug(f"[MOTD] 收到 /motdb 指令: server='{server}'")
