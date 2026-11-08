@@ -11,7 +11,7 @@
 
 ## 功能特性
 
-- **无需斜杠**: 直接输入 `motd` 即可, 无需 `/`
+- **自定义触发词**：Java 版和基岩版分别配置，支持中文和多个触发词。默认可直接发送 `motd`，也可发送 `/motd`。
 - **直连查询**: 支持失败回退 API 查询
 - **支持 SRV**: 直连查询自动解析 SRV 记录(与原版客户端行为一致), 显式指定端口时不查询 SRV(v2.4+)
 - **像素风卡片**: 泥土纹理背景 + MC GUI 浮雕面板 + 物品栏格子槽 + XP 条式玩家进度条(v2+)
@@ -109,6 +109,8 @@
 |--------|------|--------|
 | `default_server` | 默认服务器地址 | `n.rainplay.cn` |
 | `default_port` | 默认服务器端口 | `46861` |
+| `java_triggers` | Java 版查询触发词 | `["motd"]` |
+| `bedrock_triggers` | 基岩版查询触发词 | `["motd-bedrock", "motdb"]` |
 | `query_type` | 查询类型 | `normal` |
 | `proxy_query_method` | 代理查询方式 | `velostat` |
 | `velostat_api_url` | velostat API 地址 | `http://代理IP:8080` |
@@ -199,7 +201,23 @@
 
 ## 使用方法
 
-### 基础指令(无需斜杠)
+### 自定义查询触发词
+
+在 AstrBot WebUI 的插件配置中编辑「Java 版查询触发词」和「基岩版查询触发词」，保存后重载插件。也可以在已有配置文件中添加这两个字段。
+
+```json
+{
+    "java_triggers": ["查服", "mcstatus"],
+    "bedrock_triggers": ["查基岩", "motdb"]
+}
+```
+
+- 发送 `查服` 或 `/查服` 查询默认 Java 版服务器。发送 `查基岩 mc.example.com:19132` 查询指定基岩版服务器。
+- 触发词必须位于消息开头。带地址时用空格分隔。配置时每项填一个词，省略斜杠。自定义词和无斜杠指令不区分英文字母大小写，内置斜杠指令沿用 AstrBot 的匹配规则。
+- 保留默认词可继续使用原指令，移除后该词会停用。缺少配置项时使用默认列表，显式填 `[]` 时关闭对应版本的查询指令。
+- 两个列表使用不同的词。自定义词重复时优先匹配 Java 版，内置词仅能用于原来的版本。`motdconfig` 和 `motdr` 保留给管理指令。
+
+### 默认查询指令（无需斜杠）
 
 | 指令 | 说明 | 示例 |
 |------|------|------|
@@ -211,7 +229,7 @@
 | `motdb` | 查询默认基岩版服务器(`motd-bedrock` 的短别名) | `motdb` |
 | `motdb <地址:端口>` | 查询指定基岩版服务器(`motd-bedrock` 的短别名) | `motdb mc.example.com:19132` |
 
-### 带斜杠前缀的指令
+### 默认查询指令（带斜杠）
 
 | 指令 | 说明 |
 |------|------|
@@ -246,7 +264,7 @@
 
 3. **检查日志级别**
    - INFO 级别下发送 motd 查询, 应看到成对的 `[MOTD] 开始查询: ...` 与 `[MOTD] 查询完成: ...`; 没有则说明指令未被触发
-   - 指令路由细节(如 `[MOTD] 匹配到 motd 指令`、`[MOTD] 收到 /motd 指令`)为 DEBUG 级别, 在 `data/cmd_config.json` 中设置 `"log_level": "DEBUG"` 并重启后可见
+   - 指令路由细节(如 `[MOTD] 匹配到查询触发词`、`[MOTD] 收到 /motd 指令`)为 DEBUG 级别, 在 `data/cmd_config.json` 中设置 `"log_level": "DEBUG"` 并重启后可见
 
 4. **检查白名单**
    - 如果关闭了"对所有会话生效", 需要将会话 ID(不是 QQ 号)加入 `enabled_sessions` 白名单, 会话 ID 可用 `/sid` 指令获取
@@ -367,7 +385,7 @@
 ### 诊断细节日志(DEBUG)
 
 ```
-[MOTD] 匹配到 motd 指令: motd mc.example.com              # 无斜杠指令路由
+[MOTD] 匹配到查询触发词: motd mc.example.com              # 无斜杠指令路由
 [MOTD] 收到 /motd 指令: server='mc.example.com'           # 斜杠指令路由
 [MOTD] 使用指定服务器: mc.example.com:25565
 [MOTD] SRV 解析成功: mc.example.com -> play.example.com:25565
