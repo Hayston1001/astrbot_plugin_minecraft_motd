@@ -12,6 +12,10 @@ import random
 import os
 import base64
 import hashlib
+import ssl
+import queue
+import threading
+import http.client
 from pathlib import Path
 import asyncio
 from urllib.parse import quote
@@ -160,6 +164,7 @@ _SOURCE_LABELS = {
     'api': 'mcstatus.io API',
     'direct': 'TCP 直连',
     'bedrock_udp': 'UDP 直连',
+    'bedrock_nethernet': 'NetherNet 直连',
 }
 
 # ============================================================
@@ -1146,12 +1151,162 @@ async def query_java_server(host: str, port: int = JAVA_DEFAULT_PORT, timeout: i
     return direct_result
 
 
-def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, timeout: int = 5) -> Dict[str, Any]:
-    """同步查询基岩版服务器状态(Unconnected Ping)
+# NetherNet 信令状态响应体上限: 官方字段固定且很小, 64KB 足够, 超出部分不读(防御异常大包)
+_BEDROCK_NETHERNET_JSON_MAX_BYTES = 64 * 1024
 
-    注意: 本函数为同步 socket 实现, 调用方必须经 asyncio.to_thread 移入线程执行,
-    直接在事件循环中调用会阻塞事件循环(v2.3.0 曾误标 async def, 导致 to_thread
-    只创建协程不执行, 基岩查询 100% 失败 —— 审计 F009)。
+# SO_LINGER 结构体: Windows 为两个 u_short, 其他平台为两个 int; (1, 0) 表示关闭时发 RST
+_SO_LINGER_ABORT = struct.pack('HH' if os.name == 'nt' else 'ii', 1, 0)
+
+# NetherNet TLS 上下文(懒创建): 只读公开的服务器状态、不含凭据, 故跳过证书校验
+_NETHERNET_TLS_CTX: Optional[ssl.SSLContext] = None
+
+
+def _nethernet_tls_context() -> ssl.SSLContext:
+    """返回跳过证书校验的 TLS 上下文(懒创建, 不给模块导入增加副作用)"""
+    global _NETHERNET_TLS_CTX
+    if _NETHERNET_TLS_CTX is None:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False   # 自建信令多为自签证书, 且这里不是安全通道用途
+        ctx.verify_mode = ssl.CERT_NONE
+        _NETHERNET_TLS_CTX = ctx
+    return _NETHERNET_TLS_CTX
+
+
+def _bedrock_to_int(value, default: int = 0) -> int:
+    """把状态字段归一为 int: RakNet 串与部分 NetherNet 实现都可能给字符串(审计 F008)"""
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _bedrock_nethernet_get(host: str, port: int, timeout: float,
+                           use_tls: bool) -> Optional[Dict[str, Any]]:
+    """请求 NetherNet 信令端点 GET /v1/join, 成功返回响应 JSON, 失败返回 None
+
+    同步实现(http.client, 标准库), 由 query_bedrock_server 在工作线程中调用.
+    """
+    conn = None
+    sock = None
+    deadline = time.monotonic() + timeout
+
+    def _arm_timeout() -> None:
+        # http.client 的 timeout 是"每次 socket 操作"的预算, 不是整支的总预算:
+        # 慢速逐字节返回的服务端能让读取反复续命 → 每次阻塞前按绝对死线重设,
+        # 保证这一支自身在 query_timeout 内结束(统一死线语义, 不留长寿 daemon 线程)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise socket.timeout("NetherNet 信令请求超出死线")
+        sock.settimeout(remaining)
+
+    try:
+        if use_tls:
+            # 自建信令端点常用自签证书(游戏客户端本身就是首次信任 TOFU 模式),
+            # 这里只读取公开的服务器状态、不含任何凭据, 故跳过证书校验
+            conn = http.client.HTTPSConnection(
+                host, port, timeout=timeout, context=_nethernet_tls_context())
+        else:
+            conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        conn.connect()
+        # 保留 socket 引用: 响应带 Connection: close 时 http.client 会在 getresponse()
+        # 里把自己那份引用置空, 但 socket 对象仍可调整超时(文件对象持有底层 fd)
+        sock = conn.sock
+        # 服务端可能先关连接: 正常关闭会在**服务端端口**留下 TIME_WAIT, 而 BDS 绑定
+        # 该端口时不用 SO_REUSEADDR, Linux 上 60 秒内重启会静默起不来 → 主动 RST
+        # 关闭连接, 不在服务器端口上留下 TIME_WAIT(Crafty 曾踩到同一坑). 代价是
+        # 反向代理/WAF 可能把这次 RST 记为一次连接异常(状态查询本身不涉及凭据)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, _SO_LINGER_ABORT)
+        _arm_timeout()
+        conn.request("GET", "/v1/join", headers={
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",   # 不解压: 少数 WAF 会无视协商强行 gzip
+            "User-Agent": f"astrbot-minecraft-motd/{PLUGIN_VERSION}",
+            "Connection": "close",
+        })
+        _arm_timeout()
+        response = conn.getresponse()
+        status = response.status
+        # read1 每次只做一轮底层 recv, 不会在单次调用里循环续命; 配合逐块重设超时,
+        # 滴灌型响应(每 N 秒吐一字节)也无法把这一支拖过死线
+        chunks: List[bytes] = []
+        read_bytes = 0
+        while read_bytes < _BEDROCK_NETHERNET_JSON_MAX_BYTES and not response.isclosed():
+            try:
+                _arm_timeout()
+            except TimeoutError:
+                raise
+            except OSError:
+                # 已读完全部正文时 http.client 会释放底层 socket, 此时无需再读
+                break
+            chunk = response.read1(min(4096, _BEDROCK_NETHERNET_JSON_MAX_BYTES - read_bytes))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            read_bytes += len(chunk)
+        body = b"".join(chunks)
+        if not 200 <= status < 300:
+            logger.debug(f"[MOTD] NetherNet 信令({host}:{port}, tls={use_tls})返回 HTTP {status}")
+            return None
+        data = json.loads(body.decode('utf-8', errors='ignore'))
+        if not isinstance(data, dict):
+            logger.debug("[MOTD] NetherNet 信令响应不是 JSON 对象, 已忽略")
+            return None
+        return data
+    except Exception as e:
+        logger.debug(f"[MOTD] NetherNet 信令查询失败({host}:{port}, tls={use_tls}): {e}")
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _query_bedrock_nethernet(host: str, port: int, timeout: float,
+                            use_tls: bool) -> Optional[Dict[str, Any]]:
+    """查询 NetherNet(基岩版新传输层)服务器状态, 失败返回 None
+
+    BDS 26.50 起默认 transport=nethernet, 26.60 起只支持 nethernet: 这类服务器不再
+    回应 RakNet UDP ping, 而是在同一个 TCP 端口上用 HTTP 提供服务器信息:
+    GET /v1/join → {"name","protocol","version","level","players","maxPlayers","gameType"}
+    (Mojang 官方 NetherNet 信令文档, 也正是游戏客户端服务器列表显示的内容)
+
+    明文 HTTP 与 HTTPS 由调用方各起一支并行探测: BDS 内置信令默认明文, 而 Geyser/
+    反向代理与多数公共服务器只接受 HTTPS(明文请求直接 400/426), 串行会白白多等一轮.
+    耗时(latency_ms)由调用方按端到端统一盖章, 这里不填.
+    """
+    data = _bedrock_nethernet_get(host, port, timeout, use_tls=use_tls)
+    if data is None:
+        return None
+
+    name = str(data.get("name") or "").strip()
+    version = str(data.get("version") or "").strip()
+    protocol = _bedrock_to_int(data.get("protocol"))
+    if not name and protocol <= 0:
+        # 既没有名称也没有协议号: 不像 NetherNet 信令(可能只是同端口上的别的 HTTP 服务)
+        logger.debug(f"[MOTD] NetherNet 信令响应缺少 name/protocol, 已忽略: {data}")
+        return None
+
+    logger.debug(f"[MOTD] NetherNet 信令原始数据(tls={use_tls}): {data}")
+    return {
+        "edition": "MCPE",
+        "motd": name or "无描述",
+        "protocol": protocol,
+        # 版本名原样展示, 但长度封顶: 该字段服务器完全可控, 超长会把卡片渲染放大到几万像素
+        "version": (version or "未知")[:40],
+        "online_players": _bedrock_to_int(data.get("players")),
+        "max_players": _bedrock_to_int(data.get("maxPlayers")),
+        # NetherNet 信令不下发 serverId(仅 RakNet 应答含), 保持字段形态一致
+        "server_id": "未知",
+        "source": "bedrock_nethernet",
+    }
+
+
+def _query_bedrock_raknet(host: str, port: int, timeout: float) -> Dict[str, Any]:
+    """RakNet Unconnected Ping 查询(基岩版 26.50 之前的传统 UDP 传输)
+
+    同步 socket 实现, 由 query_bedrock_server 在工作线程中调用.
     """
     sock = None
     try:
@@ -1185,19 +1340,13 @@ def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, timeout: i
         server_info = data[35:].decode('utf-8', errors='ignore').split(';')
 
         if len(server_info) >= 6:
-            def _to_int(value, default=0):
-                # RakNet 状态串按 ';' 切分后全是 str, 上游格式化需要 int(审计 F008)
-                try:
-                    return int(str(value).strip())
-                except (ValueError, TypeError):
-                    return default
             return {
                 "edition": server_info[0],
                 "motd": server_info[1],
-                "protocol": _to_int(server_info[2], 0),
+                "protocol": _bedrock_to_int(server_info[2]),
                 "version": server_info[3],
-                "online_players": _to_int(server_info[4]),
-                "max_players": _to_int(server_info[5]),
+                "online_players": _bedrock_to_int(server_info[4]),
+                "max_players": _bedrock_to_int(server_info[5]),
                 "server_id": server_info[6] if len(server_info) > 6 else "未知",
                 "latency_ms": _latency_ms,
                 "source": "bedrock_udp",
@@ -1215,6 +1364,74 @@ def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, timeout: i
                 sock.close()
             except OSError:
                 pass
+
+
+def query_bedrock_server(host: str, port: int = BEDROCK_DEFAULT_PORT, timeout: int = 5) -> Dict[str, Any]:
+    """同步查询基岩版服务器状态: 并行探测 RakNet / NetherNet(HTTP+TLS), 采用先给结果的一支
+
+    基岩版存在两种互不兼容的传输形态: 旧服务器只回应 RakNet UDP ping(不监听 TCP),
+    26.50+ 默认、26.60+ 只支持 NetherNet(只在 TCP 上提供 HTTP 信令, 不回应 UDP).
+    串行探测会让第一支耗满死线、第二支永远没有窗口(被防火墙丢包时尤其明显), 因此三支
+    并行启动、各自按 timeout 自限(注意: DNS 解析与多地址 connect 重试不受 socket 超时约束,
+    极端双栈环境下单支最坏可达约 2×timeout; 外层只等第一支成功, 用户侧耗时仍受 timeout 约束),
+    外层只等"第一支成功", 整体墙钟不超过一个 query_timeout (统一死线). 明文 HTTP 与 HTTPS 各一支: BDS 内置信令默认明文, 公共服务器多是只收 HTTPS.
+
+    全部失败时返回 RakNet 的错误(原有提示更贴近"没开服/端口不对"的常见情形).
+
+    注意: 本函数为同步实现, 调用方必须经 asyncio.to_thread 移入线程执行, 直接在事件
+    循环中调用会阻塞事件循环(v2.3.0 曾误标 async def, 导致 to_thread 只创建协程
+    不执行, 基岩查询 100% 失败 —— 审计 F009).
+    """
+    _t0 = time.perf_counter()
+    _results: "queue.Queue[Tuple[str, Dict[str, Any]]]" = queue.Queue()
+
+    def _probe(_name: str, _probe_fn):
+        try:
+            _result = _probe_fn()
+        except Exception as e:
+            _result = {"error": f"查询失败: {str(e)}"}
+        if not isinstance(_result, dict):
+            # NetherNet 分支不可用时会返回 None, 归一为错误, 避免下游按 dict 判断
+            _result = {"error": f"{_name} 无有效响应"}
+        _results.put((_name, _result))
+
+    # 三支都是 daemon 线程: 先成功的一支返回后, 其余会在自己的死线/socket 超时后自然结束
+    _probes = (
+        ("raknet", lambda: _query_bedrock_raknet(host, port, timeout)),
+        ("nethernet", lambda: _query_bedrock_nethernet(host, port, timeout, use_tls=False)),
+        ("nethernet-tls", lambda: _query_bedrock_nethernet(host, port, timeout, use_tls=True)),
+    )
+    started = 0
+    for _probe_name, _probe_fn in _probes:
+        try:
+            threading.Thread(target=_probe, args=(_probe_name, _probe_fn),
+                             name=f"motd-bedrock-{_probe_name}", daemon=True).start()
+            started += 1
+        except RuntimeError as e:
+            # 线程耗尽等极端情况: 少启动一支就少一份结果, 其余支照常裁决
+            logger.warning(f"[MOTD] 基岩版传输探测线程启动失败({_probe_name}): {e}")
+
+    fallback_error: Optional[Dict[str, Any]] = None
+    finished = 0
+    while finished < started:
+        remaining = timeout - (time.perf_counter() - _t0)
+        if remaining <= 0:
+            break
+        try:
+            _name, _result = _results.get(timeout=remaining)
+        except queue.Empty:
+            break
+        finished += 1
+        if "error" not in _result:
+            # 端到端耗时: 含其它支并行探测的时间, 与用户实际等待一致
+            _result["latency_ms"] = round((time.perf_counter() - _t0) * 1000)
+            logger.debug(f"[MOTD] 基岩版传输探测命中: {_name}")
+            return _result
+        logger.debug(f"[MOTD] 基岩版传输探测失败: {_name} → {_result.get('error')}")
+        if _name == "raknet":
+            fallback_error = _result
+
+    return fallback_error or {"error": "连接超时, 请检查服务器地址和端口是否正确"}
 
 
 def parse_sub_servers_config(config_str: str) -> list:
@@ -2808,7 +3025,8 @@ class MOTDPlugin(Star):
             return ctx
         else:
             motd_html = self._motd_to_html(result.get("motd", "无描述"), max_length=100)
-            server_version = result.get("version", "未知")
+            # 版本名服务器完全可控: 过长会把卡片渲染放大到几万像素(占满发送闸门), 统一封顶
+            server_version = str(result.get("version", "未知"))[:40]
             # 防御: 上游理论上有 str 人数的可能(审计 F008, 现已在 query 层归一, 此处兜底)
             try:
                 online = int(result.get("online_players", 0))
@@ -2885,8 +3103,8 @@ class MOTDPlugin(Star):
             if is_java:
                 result = await query_java_server(server, port, self.query_timeout, self.use_api)
             else:
-                # 基岩版为同步 socket, 移入线程执行: 超时等待期间不再阻塞事件循环(单核弱机上尤为明显)
-                # socket 自身 settimeout(query_timeout) 自限; 线程调度带来的毫秒级越界可接受
+                # 基岩版为同步实现(socket + http.client), 移入线程执行: 超时等待期间不再阻塞事件循环(单核弱机上尤为明显)
+                # 各传输支内部按 query_timeout 自限; 线程调度带来的毫秒级越界可接受
                 result = await asyncio.to_thread(query_bedrock_server, server, port, self.query_timeout)
             # 弱机友好: 只记关键字段, 不再格式化完整查询结果(样例可极长且含 base64 图标)
             if "error" in result:
