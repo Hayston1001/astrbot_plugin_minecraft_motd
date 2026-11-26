@@ -3147,7 +3147,9 @@ class MOTDPlugin(Star):
                     f"错误: {ctx.get('error_msg', '未知')}"
                 )
             motd_plain = self._format_motd(result.get("description", result.get("motd", "")))
-            motd_line = (motd_plain or "无描述")[:80]
+            # 纯文本通道不渲染样式: 必须剥掉 § 颜色/格式码, 否则消息里会原样出现 "§f§f" 这类控制码
+            motd_plain = _MOTD_SECTION_RE.sub('', motd_plain)
+            motd_line = (motd_plain or "无描述").strip()[:80]
             lines = [
                 f"{self._emoji(event, 'success')} {ctx.get('server_address')}",
                 f"{self._emoji(event, 'online')} 玩家: {ctx.get('online', 0)}/{ctx.get('max_players', 0)}",
